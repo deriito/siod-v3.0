@@ -1,0 +1,8 @@
+# cmake dist
+cmake-build-debug
+
+# idea folder
+**/.idea
+
+# macos finder folder
+**/.DS_Store
