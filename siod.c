@@ -16,10 +16,12 @@ Cambridge, MA 02138
 
 An example main-program call with some customized subrs.
 
-  */
+*/
 
 /*
- * Program arguments:
+ * by Guang Yang on 2022/09/06:
+ *
+ * Rule of program arguments:
  * [-h<heap_size>:<heap_nums>] [-o<obarray_dim>] [-i<file_name>] [-n<inums_dim>] [-g<0/1>] [-s<stack_size>]
  */
 
