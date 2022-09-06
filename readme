@@ -1,3 +1,33 @@
+Quick Start:
+
+1. Download this source code
+    > git clone git@github.com:deriito/siod-v3.0.git
+
+3. Open with an IDE (e.x. CLion)
+
+4. Run
+
+=======================================================================================================
+Update History:
+
+* Edited on 2022.09.06:
+The implement of "assert-dead(p)" in the thesis called "GC assertions[1]" has been implemented
+in the brach "main" of this project. You can use it to assert the object which should be "dead"
+in your source code. For more information, please see the original thesis.
+
+[1] Aftandilian, Edward E., and Samuel Z. Guyer.
+    "GC assertions: Using the garbage collector to check heap properties."
+    Proceedings of the 30th ACM SIGPLAN Conference on Programming Language Design and Implementation.
+    2009.
+
+* Edited on 2022.09.06:
+This is the version 3.0 of Siod, downloaded from https://www.cs.cmu.edu/afs/cs/project/ai-repository/ai/lang/scheme/impl/siod/0.html
+
+=======================================================================================================
+Original "README.txt" is as following:
+
+=======================================================================================================
+
 This is version 3.0 of Siod, Scheme In One Defun.
 
 It is a small implementation of the Scheme programming language.

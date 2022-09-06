@@ -9,6 +9,7 @@
 struct obj {
     short gc_mark;
     short type;
+    short assert_dead; // for assert_dead
     union {
         struct {
             struct obj *car;
