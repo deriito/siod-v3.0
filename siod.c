@@ -18,6 +18,11 @@ An example main-program call with some customized subrs.
 
   */
 
+/*
+ * Program arguments:
+ * [-h<heap_size>:<heap_nums>] [-o<obarray_dim>] [-i<file_name>] [-n<inums_dim>] [-g<0/1>] [-s<stack_size>]
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
