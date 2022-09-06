@@ -146,6 +146,9 @@ long stack_size =
         50000;
 #endif
 
+// for recording gc marked objects
+static LISP **traced_objs = NULL;
+
 void process_cla(int argc, char **argv, int warnflag) {
     int k;
     char *ptr;
@@ -606,6 +609,15 @@ LISP symbol_value(LISP x, LISP env) {
     return (tmp);
 }
 
+// gc assertions
+LISP assert_dead(LISP ptr) {
+    if (NULLP(ptr)) {
+        return err("Null Pointer!", ptr);
+    }
+    ptr->assert_dead = 1;
+    return (NIL);
+}
+
 char *must_malloc(unsigned long size) {
     char *tmp;
     tmp = (char *) malloc(size);
@@ -1020,24 +1032,95 @@ void gc_ms_stats_end(void) {
                gc_cells_collected);
 }
 
-void gc_mark(LISP ptr) {
+void type_to_string(char *res, short type) {
+    switch (type) {
+        case tc_cons:
+            strcpy(res, "CONS");
+            return;
+        case tc_flonum:
+            strcpy(res, "FLONUM");
+            return;
+        case tc_closure:
+            strcpy(res, "CLOSURE");
+            return;
+        default:
+            strcpy(res, "NO SUCH TYPE: ");
+            char tp[5];
+            sprintf(tp, "%d", type);
+            strcat(res, tp);
+    }
+}
+
+void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
+    if (NULL == traced_objs) {
+        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see slib.c:1456)\n\033[0m");
+        return;
+    }
+
+    char res[25];
+    type_to_string(res, ptr->type);
+
+    long path_info_length = 1L;
+    path_info_length += traced_objs_tail_index < 0 ? 0 : traced_objs_tail_index;
+    char path[path_info_length * (25 + 10 + 10)]; // e.g. "TYPE; -> \n"
+
+    for (long i = 0; i <= traced_objs_tail_index; i++) {
+        char tp[25];
+        type_to_string(tp, (*traced_objs[i])->type);
+        strcat(path, tp);
+        char semicolon_space[10] = "; ";
+        strcat(path, semicolon_space);
+        if (i != traced_objs_tail_index) {
+            strcat(path, "-> \n");
+        } else {
+            strcat(path, "\n");
+        }
+    }
+
+    printf("\033[31mWarning: an object that was asserted dead is reachable.\nType: %s;\nPath to object: %s\033[0m",
+           res, path);
+}
+
+void gc_mark(LISP ptr, long traced_objs_tail_index) {
     struct user_type_hooks *p;
+
     gc_mark_loop:
-    if NULLP(ptr) return;
-    if ((*ptr).gc_mark) return;
+    if NULLP(ptr) {
+        return;
+    }
+
+    if ((*ptr).gc_mark) {
+        return;
+    }
+
     (*ptr).gc_mark = 1;
+
+    // recoding mark info that is for output of the full reference path
+    if (NULL == traced_objs) {
+        traced_objs = (LISP **) malloc(sizeof(LISP *) * heap_size);
+    }
+
+    long my_traced_objs_tail_index = traced_objs_tail_index;
+    my_traced_objs_tail_index++;
+    traced_objs[my_traced_objs_tail_index] = &ptr;
+
+    // assert_dead check
+    if (ptr->assert_dead) {
+        process_dead_marked_obj(ptr, my_traced_objs_tail_index);
+    }
+
     switch ((*ptr).type) {
         case tc_flonum:
             break;
         case tc_cons:
-            gc_mark(CAR(ptr));
+            gc_mark(CAR(ptr), my_traced_objs_tail_index);
             ptr = CDR(ptr);
             goto gc_mark_loop;
         case tc_symbol:
             ptr = VCELL(ptr);
             goto gc_mark_loop;
         case tc_closure:
-            gc_mark((*ptr).storage_as.closure.code);
+            gc_mark((*ptr).storage_as.closure.code, my_traced_objs_tail_index);
             ptr = (*ptr).storage_as.closure.env;
             goto gc_mark_loop;
         case tc_subr_0:
@@ -1063,7 +1146,7 @@ void mark_protected_registers(void) {
         location = (*reg).location;
         n = (*reg).length;
         for (j = 0; j < n; ++j)
-            gc_mark(location[j]);
+            gc_mark(location[j], -1L);
     }
 }
 
@@ -1098,7 +1181,7 @@ void mark_locations_array(LISP *x, long n) {
     for (j = 0; j < n; ++j) {
         p = x[j];
         if (looks_pointerp(p))
-            gc_mark(p);
+            gc_mark(p, -1L);
     }
 }
 
@@ -2074,6 +2157,7 @@ void init_subrs_1(void) {
     init_subr_1("nreverse", nreverse);
     init_subr_0("allocate-heap", allocate_aheap);
     init_subr_1("gc-info", gc_info);
+    init_subr_1("assert_dead", assert_dead);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */
