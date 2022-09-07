@@ -1724,18 +1724,32 @@ int f_getc(FILE *f) {
 
 void f_ungetc(int c, FILE *f) { ungetc(c, f); }
 
+// 忽略注释换行等 返回一个具体字符
 int flush_ws(struct gen_readio *f, char *eoferr) {
     int c, commentp;
-    commentp = 0;
+    commentp = 0; // 是否是注释
     while (1) {
         c = GETC_FCN(f);
-        if (c == EOF) if (eoferr) err(eoferr, NIL); else return (c);
-        if (commentp) { if (c == '\n') commentp = 0; }
-        else if (c == ';') commentp = 1;
-        else if (!isspace(c)) return (c);
+        if (c == EOF) {
+            if (eoferr) {
+                err(eoferr, NIL);
+            } else {
+                return (c);
+            }
+        }
+        if (commentp) {
+            if (c == '\n') {
+                commentp = 0;
+            }
+        } else if (c == ';') {
+            commentp = 1;
+        } else if (!isspace(c)) {
+            return (c);
+        }
     }
 }
 
+// 构造读取文件的结构体
 LISP lreadf(FILE *f) {
     struct gen_readio s;
     s.getc_fcn = (int (*)(char *)) f_getc;
