@@ -1,0 +1,6 @@
+(define x 1 101)
+(define y 2 102)
+(cons x y 103)
+(assert_dead x)
+(assert_dead y)
+(gc)

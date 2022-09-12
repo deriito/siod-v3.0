@@ -149,6 +149,24 @@ long stack_size =
 // for recording gc marked objects
 static LISP **traced_objs = NULL;
 
+// for recording assign_site
+short is_record_assign_site = 1;
+int assign_site_max_num = 10000; // TODO How to decide this value?
+
+void try_record_assign_site(LISP *assign_obj, LISP *assigned_obj, long assign_site) {
+    if (!is_record_assign_site) {
+        return;
+    }
+    if (NULL == (*assigned_obj)->assign_obj_types) {
+        (*assigned_obj)->assign_obj_types = (short *) malloc(sizeof(short) * assign_site_max_num);
+        (*assigned_obj)->assign_sites = (long *) malloc(sizeof(long) * assign_site_max_num);
+        (*assigned_obj)->assign_lisp_objs_tail_index = -1;
+    }
+    ++(*assigned_obj)->assign_lisp_objs_tail_index;
+    (*assigned_obj)->assign_obj_types[(*assigned_obj)->assign_lisp_objs_tail_index] = (*assign_obj)->type;
+    (*assigned_obj)->assign_sites[(*assigned_obj)->assign_lisp_objs_tail_index] = assign_site;
+}
+
 void process_cla(int argc, char **argv, int warnflag) {
     int k;
     char *ptr;
@@ -485,6 +503,14 @@ LISP cons(LISP x, LISP y) {
     return (z);
 }
 
+LISP external_cons(LISP x, LISP y, LISP line_num) {
+    LISP new_cons = cons(x, y);
+    long ln = (long) line_num->storage_as.flonum.data;
+    try_record_assign_site(&new_cons, &x, ln);
+    try_record_assign_site(&new_cons, &y, ln);
+    return new_cons;
+}
+
 LISP consp(LISP x) { if CONSP(x) return (truth); else return (NIL); }
 
 LISP car(LISP x) {
@@ -677,7 +703,9 @@ LISP closure(LISP env, LISP code) {
     return (z);
 }
 
-void gc_protect(LISP *location) { gc_protect_n(location, 1); }
+void gc_protect(LISP *location) {
+    gc_protect_n(location, 1);
+}
 
 void gc_protect_n(LISP *location, long n) {
     struct gc_protected *reg;
@@ -1003,6 +1031,7 @@ void gc_mark_and_sweep(void) {
     LISP stack_end;
     gc_ms_stats_start();
     setjmp(save_regs_gc_mark);
+
     mark_locations((LISP *) save_regs_gc_mark,
                    (LISP *) (((char *) save_regs_gc_mark) + sizeof(save_regs_gc_mark)));
     mark_protected_registers();
@@ -1040,12 +1069,15 @@ void type_to_string(char *res, short type) {
         case tc_flonum:
             strcpy(res, "FLONUM");
             return;
+        case tc_symbol:
+            strcpy(res, "SYMBOL");
+            return;
         case tc_closure:
             strcpy(res, "CLOSURE");
             return;
         default:
             strcpy(res, "NO SUCH TYPE: ");
-            char tp[5];
+            char tp[5] = "";
             sprintf(tp, "%d", type);
             strcat(res, tp);
     }
@@ -1053,31 +1085,55 @@ void type_to_string(char *res, short type) {
 
 void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
     if (NULL == traced_objs) {
-        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see slib.c:1456)\n\033[0m");
+        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"process_dead_marked_obj()\")\n\033[0m");
         return;
     }
 
-    char res[25];
+    char res[25] = "";
     type_to_string(res, ptr->type);
 
     long path_info_length = 1L;
     path_info_length += traced_objs_tail_index < 0 ? 0 : traced_objs_tail_index;
-    char path[path_info_length * (25 + 10 + 10)]; // e.g. "TYPE; -> \n"
 
+    // e.g. "TYPE; ->\n"
+    char path[path_info_length * (25 + 10)];
+    memset(path, 0, sizeof(path));
     for (long i = 0; i <= traced_objs_tail_index; i++) {
-        char tp[25];
+        char tp[25] = "";
         type_to_string(tp, (*traced_objs[i])->type);
         strcat(path, tp);
-        char semicolon_space[10] = "; ";
-        strcat(path, semicolon_space);
+        strcat(path, "; ");
         if (i != traced_objs_tail_index) {
-            strcat(path, "-> \n");
-        } else {
-            strcat(path, "\n");
+            strcat(path, "->\n");
         }
     }
 
-    printf("\033[31mWarning: an object that was asserted dead is reachable.\nType: %s;\nPath to object: %s\033[0m",
+    if (is_record_assign_site) {
+        int assign_lisp_objs_length = ptr->assign_lisp_objs_tail_index + 1;
+        char assign_site_res[assign_lisp_objs_length * (25 + 3 + 15 + 3)];
+        memset(assign_site_res, 0, sizeof(assign_site_res));
+        for (int i = 0; i < assign_lisp_objs_length; i++) {
+            char tp[25] = "";
+            type_to_string(tp, ptr->assign_obj_types[i]);
+            strcat(assign_site_res, tp);
+            strcat(assign_site_res, ", ");
+
+            char line_num_str[15] = "";
+            sprintf(line_num_str, "ln: %ld", ptr->assign_sites[i]);
+            strcat(assign_site_res, line_num_str);
+            if (i != assign_lisp_objs_length - 1) {
+                strcat(assign_site_res, ";\n");
+            }
+        }
+
+        printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
+               "Type: %s;\nPath to object: %s\nAssigned at: %s\n\n\033[0m",
+               res, path, assign_site_res);
+        return;
+    }
+
+    printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
+           "Type: %s;\nPath to object: %s\n\n\033[0m",
            res, path);
 }
 
@@ -1101,7 +1157,7 @@ void gc_mark(LISP ptr, long traced_objs_tail_index) {
     }
 
     long my_traced_objs_tail_index = traced_objs_tail_index;
-    my_traced_objs_tail_index++;
+    ++my_traced_objs_tail_index;
     traced_objs[my_traced_objs_tail_index] = &ptr;
 
     // assert_dead check
@@ -1145,8 +1201,9 @@ void mark_protected_registers(void) {
     for (reg = protected_registers; reg; reg = (*reg).next) {
         location = (*reg).location;
         n = (*reg).length;
-        for (j = 0; j < n; ++j)
+        for (j = 0; j < n; ++j) {
             gc_mark(location[j], -1L);
+        }
     }
 }
 
@@ -1180,8 +1237,9 @@ void mark_locations_array(LISP *x, long n) {
     LISP p;
     for (j = 0; j < n; ++j) {
         p = x[j];
-        if (looks_pointerp(p))
+        if (looks_pointerp(p)) {
             gc_mark(p, -1L);
+        }
     }
 }
 
@@ -1219,6 +1277,14 @@ void gc_sweep(void) {
                     }
                     ++n;
                     (*ptr).type = tc_free_cell;
+
+                    // sweep data structure of recording assign site
+                    free((*ptr).assign_obj_types);
+                    (*ptr).assign_obj_types = NULL;
+                    free((*ptr).assign_sites);
+                    (*ptr).assign_sites = NULL;
+                    (*ptr).assign_lisp_objs_tail_index = -1;
+
                     CDR(ptr) = nfreelist;
                     nfreelist = ptr;
                 } else
@@ -1439,7 +1505,14 @@ LISP setvar(LISP var, LISP val, LISP env) {
     return (CAR(tmp) = val);
 }
 
-LISP leval_setq(LISP args, LISP env) { return (setvar(car(args), leval(car(cdr(args)), env), env)); }
+LISP leval_setq(LISP args, LISP env) {
+    LISP var = car(args);
+    LISP val = leval(car(cdr(args)), env);
+    // for recording assign site
+    long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
+    try_record_assign_site(&var, &val, assign_site);
+    return (setvar(var, val, env));
+}
 
 LISP syntax_define(LISP args) {
     if SYMBOLP(car(args)) return (args);
@@ -1458,8 +1531,17 @@ LISP leval_define(LISP args, LISP env) {
     if NSYMBOLP(var) err("wta(non-symbol) to define", var);
     val = leval(car(cdr(tmp)), env);
     tmp = envlookup(var, env);
-    if NNULLP(tmp) return (CAR(tmp) = val);
-    if NULLP(env) return (VCELL(var) = val);
+
+    // record assign_site
+    long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
+    try_record_assign_site(&var, &val, assign_site);
+
+    if NNULLP(tmp) {
+        return (CAR(tmp) = val);
+    }
+    if NULLP(env) {
+        return (VCELL(var) = val);
+    }
     tmp = car(env);
     setcar(tmp, cons(var, car(tmp)));
     setcdr(tmp, cons(val, cdr(tmp)));
@@ -2102,7 +2184,7 @@ LISP nreverse(LISP x) {
 }
 
 void init_subrs_1(void) {
-    init_subr_2("cons", cons);
+    init_subr_3("cons", external_cons);
     init_subr_1("car", car);
     init_subr_1("cdr", cdr);
     init_subr_2("set-car!", setcar);

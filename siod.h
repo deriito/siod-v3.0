@@ -9,7 +9,13 @@
 struct obj {
     short gc_mark;
     short type;
-    short assert_dead; // for assert_dead
+    // for assert_dead
+    short assert_dead;
+    // for recording assign sites
+    int assign_lisp_objs_tail_index;
+    short *assign_obj_types; // (struct obj * == LISP)
+    long *assign_sites;
+
     union {
         struct {
             struct obj *car;
