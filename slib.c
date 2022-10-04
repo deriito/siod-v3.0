@@ -1646,6 +1646,8 @@ LISP leval_define(LISP args, LISP env) {
     tmp = car(env);
     setcar(tmp, cons(var, car(tmp)));
     setcdr(tmp, cons(val, cdr(tmp)));
+
+    // cdr(tmp) 为最新frame的实参列表
     try_record_assign_site(cdr(tmp), val, assign_site, 1);
     return (val);
 }
