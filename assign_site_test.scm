@@ -1,6 +1,13 @@
-(define x 1 101)
-(define y 2 102)
-(cons x y 103)
-(assert_dead x)
-(assert_dead y)
+(define func1 (lambda (x) (+ x 1)) 1)
+(define func2 (lambda (x) (+ x 2)) 2)
+(define cons1 (cons 1 2 "MyNumCons" 3) 3)
+
+(assert_dead func1)
+(assert_dead func2)
+
+(gc)
+
+(set-car! cons1 func1 10)
+(set-cdr! cons1 func2 11)
+
 (gc)

@@ -11,86 +11,94 @@ struct obj {
     short type;
     // for assert_dead
     short assert_dead;
-    // for recording assign sites
-    int assign_lisp_objs_tail_index;
-    short *assign_obj_types; // (struct obj * == LISP)
-    long *assign_sites;
 
     union {
         struct {
             struct obj *car;
+            long car_assign_site;
             struct obj *cdr;
+            long cdr_assign_site;
+            char *class_tag;
+            short is_env_cons;
         } cons;
+
         struct {
             double data;
         } flonum;
+
         struct {
             char *pname;
             struct obj *vcell;
+            long vcell_assign_site;
         } symbol;
 
         struct {
             char *name;
-
             struct obj *(*f)(void);
         } subr0;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *);
         } subr1;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *, struct obj *);
         } subr2;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *, struct obj *, struct obj *);
         } subr3;
 
         struct {
             char *name;
+            struct obj *(*f)(struct obj *, struct obj *, struct obj *, struct obj *);
+        } subr4;
 
+        struct {
+            char *name;
             struct obj *(*f)(struct obj **, struct obj **);
         } subrm;
 
         struct {
             char *name;
-
             struct obj *(*f)(void *, ...);
         } subr;
 
         struct {
             struct obj *env;
+            long env_assign_site;
             struct obj *code;
+            long code_assign_site;
         } closure;
+
         struct {
             long dim;
             long *data;
         } long_array;
+
         struct {
             long dim;
             double *data;
         } double_array;
+
         struct {
             long dim;
             char *data;
         } string;
+
         struct {
             long dim;
             struct obj **data;
         } lisp_array;
+
         struct {
             FILE *f;
             char *name;
         } c_file;
-    }
-            storage_as;
+    } storage_as;
 };
 
 #define CAR(x) ((*x).storage_as.cons.car)
@@ -101,6 +109,7 @@ struct obj {
 #define SUBR1(x) (*((*x).storage_as.subr1.f))
 #define SUBR2(x) (*((*x).storage_as.subr2.f))
 #define SUBR3(x) (*((*x).storage_as.subr3.f))
+#define SUBR4(x) (*((*x).storage_as.subr4.f))
 #define SUBRM(x) (*((*x).storage_as.subrm.f))
 #define SUBRF(x) (*((*x).storage_as.subr.f))
 #define FLONM(x) ((*x).storage_as.flonum.data)
@@ -134,6 +143,7 @@ struct obj {
 #define tc_long_array   15
 #define tc_lisp_array   16
 #define tc_c_file       17
+#define tc_subr_4 18
 #define tc_user_1 50
 #define tc_user_2 51
 #define tc_user_3 52
@@ -153,6 +163,8 @@ struct obj {
 #define FO_listd 124
 
 #define tc_table_dim 100
+
+#define INTERNAL_CONS "INTERNAL_CONS"
 
 typedef struct obj *LISP;
 
@@ -232,7 +244,11 @@ LISP cdr(LISP x);
 
 LISP setcar(LISP cell, LISP value);
 
+LISP setcar_exteral(LISP cell, LISP value, LISP line_num);
+
 LISP setcdr(LISP cell, LISP value);
+
+LISP setcdr_exteral(LISP cell, LISP value, LISP line_num);
 
 LISP flocons(double x);
 
@@ -287,6 +303,8 @@ void init_subr_1(char *name, LISP (*fcn)(LISP));
 void init_subr_2(char *name, LISP (*fcn)(LISP, LISP));
 
 void init_subr_3(char *name, LISP (*fcn)(LISP, LISP, LISP));
+
+void init_subr_4(char *name, LISP (*fcn)(LISP, LISP, LISP, LISP));
 
 void init_lsubr(char *name, LISP (*fcn)(LISP));
 

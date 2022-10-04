@@ -422,6 +422,7 @@ long c_sxhash(LISP obj, long n) {
         case tc_subr_1:
         case tc_subr_2:
         case tc_subr_3:
+        case tc_subr_4:
         case tc_lsubr:
         case tc_fsubr:
         case tc_msubr:
