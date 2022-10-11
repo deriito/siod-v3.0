@@ -526,10 +526,12 @@ LISP env_cons(LISP x, LISP y) {
 LISP external_cons(LISP x, LISP y, LISP custom_tag, LISP line_num) {
     LISP new_cons = cons(x, y);
     new_cons->storage_as.cons.class_tag = get_c_string(custom_tag); // TODO string的内存占用还没有处理
-    long ln = (long) line_num->storage_as.flonum.data;
-    try_record_assign_site(new_cons, x, ln, 1);
-    try_record_assign_site(new_cons, y, ln, 0);
-    return new_cons;
+    if (is_record_assign_site) {
+        long ln = (long) line_num->storage_as.flonum.data;
+        try_record_assign_site(new_cons, x, ln, 1);
+        try_record_assign_site(new_cons, y, ln, 0);
+    }
+    return (new_cons);
 }
 
 LISP consp(LISP x) { if CONSP(x) return (truth); else return (NIL); }
@@ -563,7 +565,9 @@ LISP setcar(LISP cell, LISP value) {
 
 LISP setcar_exteral(LISP cell, LISP value, LISP line_num) {
     LISP result = setcar(cell, value);
-    try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 1);
+    if (is_record_assign_site) {
+        try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 1);
+    }
     return (result);
 }
 
@@ -574,7 +578,9 @@ LISP setcdr(LISP cell, LISP value) {
 
 LISP setcdr_exteral(LISP cell, LISP value, LISP line_num) {
     LISP result = setcdr(cell, value);
-    try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 0);
+    if (is_record_assign_site) {
+        try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 0);
+    }
     return (result);
 }
 
@@ -1150,7 +1156,7 @@ void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
      * TYPE1; @ln10->
      * ...
      */
-    char path[(path_info_length + 1) * (25 + 10 + 10)];
+    char path[(path_info_length + 1) * (40 + 10 + 10)];
     memset(path, 0, sizeof(path));
 
     for (long i = 0; i <= traced_objs_tail_index; i++) {
@@ -1443,22 +1449,27 @@ LISP gc_info(LISP arg) {
 
 LISP leval_args(LISP l, LISP env) {
     LISP result, v1, v2, tmp;
-    if NULLP(l) return (NIL);
-    if NCONSP(l) err("bad syntax argument list", l);
+    if NULLP(l) {
+        return (NIL);
+    }
+    if NCONSP(l) {
+        err("bad syntax argument list", l);
+    }
     result = cons(leval(CAR(l), env), NIL);
-    for (v1 = result, v2 = CDR(l);
-         CONSP(v2);
-         v1 = tmp, v2 = CDR(v2)) {
+    for (v1 = result, v2 = CDR(l); CONSP(v2); v1 = tmp, v2 = CDR(v2)) {
         tmp = cons(leval(CAR(v2), env), NIL);
         CDR(v1) = tmp;
     }
-    if NNULLP(v2) err("bad syntax argument list", l);
+    if NNULLP(v2) {
+        err("bad syntax argument list", l);
+    }
     return (result);
 }
 
 LISP extend_env(LISP actuals, LISP formals, LISP env) {
-    if SYMBOLP(formals)
+    if SYMBOLP(formals) {
         return (env_cons(env_cons(env_cons(formals, NIL), env_cons(actuals, NIL)), env));
+    }
     return (env_cons(env_cons(formals, actuals), env));
 }
 
@@ -1593,9 +1604,11 @@ LISP setvar(LISP var, LISP val, LISP env) {
 LISP leval_setq(LISP args, LISP env) {
     LISP var = car(args);
     LISP val = leval(car(cdr(args)), env);
-    // for recording assign site
-    long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
-    try_record_assign_site(var, val, assign_site, 1);
+    if (is_record_assign_site) {
+        // for recording assign site
+        long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
+        try_record_assign_site(var, val, assign_site, 1);
+    }
     return (setvar(var, val, env));
 }
 
@@ -1634,12 +1647,16 @@ LISP leval_define(LISP args, LISP env) {
     long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
 
     if NNULLP(tmp) {
-        try_record_assign_site(tmp, val, assign_site, 1);
+        if (is_record_assign_site) {
+            try_record_assign_site(tmp, val, assign_site, 1);
+        }
         return (CAR(tmp) = val);
     }
 
     if NULLP(env) {
-        try_record_assign_site(var, val, assign_site, 1);
+        if (is_record_assign_site) {
+            try_record_assign_site(var, val, assign_site, 1);
+        }
         return (VCELL(var) = val);
     }
 
@@ -1647,8 +1664,10 @@ LISP leval_define(LISP args, LISP env) {
     setcar(tmp, cons(var, car(tmp)));
     setcdr(tmp, cons(val, cdr(tmp)));
 
-    // cdr(tmp) 为最新frame的实参列表
-    try_record_assign_site(cdr(tmp), val, assign_site, 1);
+    if (is_record_assign_site) {
+        // cdr(tmp) 为最新frame的实参列表
+        try_record_assign_site(cdr(tmp), val, assign_site, 1);
+    }
     return (val);
 }
 
@@ -1663,11 +1682,27 @@ LISP leval_if(LISP *pform, LISP *penv) {
 }
 
 LISP leval_lambda(LISP args, LISP env) {
+    // 将最后一个元素取出，因为最后一个元素是assign site
+    args = reverse(args);
+    LISP assign_site_obj = car(args);
+    args = reverse(cdr(args));
+
     LISP body;
-    if NULLP(cdr(cdr(args)))
+    if NULLP(cdr(cdr(args))) {
         body = car(cdr(args));
-    else body = cons(sym_progn, cdr(args));
-    return (closure(env, cons(arglchk(car(args)), body)));
+    } else {
+        body = cons(sym_progn, cdr(args));
+    }
+
+    LISP code = cons(arglchk(car(args)), body);
+    LISP result = closure(env, code);
+
+    if (is_record_assign_site) {
+        long assign_site = (long) assign_site_obj->storage_as.flonum.data;
+        try_record_assign_site(result, env, assign_site, 1);
+        try_record_assign_site(result, code, assign_site, 0);
+    }
+    return (result);
 }
 
 LISP leval_progn(LISP *pform, LISP *penv) {
@@ -1768,7 +1803,9 @@ LISP leval_let(LISP *pform, LISP *penv) {
 LISP reverse(LISP l) {
     LISP n, p;
     n = NIL;
-    for (p = l; NNULLP(p); p = cdr(p)) n = cons(car(p), n);
+    for (p = l; NNULLP(p); p = cdr(p)) {
+        n = cons(car(p), n);
+    }
     return (n);
 }
 
@@ -1779,8 +1816,9 @@ LISP let_macro(LISP form) {
     LISP p, fl, al, tmp;
     fl = NIL; // 形参列表
     al = NIL; // 实参列表
+
     for (p = car(cdr(form)); NNULLP(p); p = cdr(p)) {
-        tmp = car(p);
+        tmp = car(p); // 取得一个形参实参的pair, e.g. (x (1 NIL))
         if SYMBOLP(tmp) {
             fl = cons(tmp, fl);
             al = cons(NIL, al);
@@ -1790,13 +1828,19 @@ LISP let_macro(LISP form) {
         }
     }
     p = cdr(cdr(form));
-    if NULLP(cdr(p)) p = car(p); else p = cons(sym_progn, p);
+    if NULLP(cdr(p)) {
+        p = car(p);
+    } else {
+        p = cons(sym_progn, p);
+    }
     setcdr(form, cons(reverse(fl), cons(reverse(al), cons(p, NIL))));
     setcar(form, cintern("let-internal"));
     return (form);
 }
 
-LISP leval_quote(LISP args, LISP env) { return (car(args)); }
+LISP leval_quote(LISP args, LISP env) {
+    return (car(args));
+}
 
 LISP leval_tenv(LISP args, LISP env) { return (env); }
 
