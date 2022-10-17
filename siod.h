@@ -236,6 +236,8 @@ LISP newcell(long type);
 
 LISP cons(LISP x, LISP y);
 
+LISP external_cons(LISP x, LISP y, LISP custom_tag, LISP line_num);
+
 LISP consp(LISP x);
 
 LISP car(LISP x);
@@ -412,6 +414,8 @@ LISP equal(LISP, LISP);
 LISP assoc(LISP x, LISP alist);
 
 LISP make_list(LISP x, LISP v);
+
+LISP make_list_external(LISP x, LISP v, LISP custom_tag, LISP line_num);
 
 void set_fatal_exit_hook(void (*fcn)(void));
 

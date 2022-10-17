@@ -2405,7 +2405,7 @@ void init_subrs_1(void) {
     init_subr_1("nreverse", nreverse);
     init_subr_0("allocate-heap", allocate_aheap);
     init_subr_1("gc-info", gc_info);
-    init_subr_1("assert_dead", assert_dead);
+    init_subr_1("assert-dead", assert_dead);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */

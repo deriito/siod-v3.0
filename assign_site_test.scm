@@ -2,8 +2,8 @@
 (define func2 (lambda (x) (+ x 2)) 2)
 (define cons1 (cons 1 2 "MyNumCons" 3) 3)
 
-(assert_dead func1)
-(assert_dead func2)
+(assert-dead func1)
+(assert-dead func2)
 
 (gc)
 
