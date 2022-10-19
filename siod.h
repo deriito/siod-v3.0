@@ -156,7 +156,6 @@ struct obj {
 #define tc_sys_4 94
 #define tc_sys_5 95
 
-
 #define FO_fetch 127
 #define FO_store 126
 #define FO_list  125
@@ -165,6 +164,14 @@ struct obj {
 #define tc_table_dim 100
 
 #define INTERNAL_CONS "INTERNAL_CONS"
+
+#define TYPE_STR_CONS "CONS"
+#define TYPE_STR_FLONUM "FLONUM"
+#define TYPE_STR_SYMBOL "SYMBOL"
+#define TYPE_STR_CLOSURE "CLOSURE"
+#define TYPE_STR_STRING "STRING"
+#define TYPE_STR_FILE "FILE"
+#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
 
 typedef struct obj *LISP;
 
