@@ -158,8 +158,16 @@ static LISP *traced_objs = NULL;
 // for recording assign_site
 short is_record_assign_site = 1;
 
+int is_focusing_assign_pattern(LISP assign_obj, LISP assigned_obj) {
+    return 0;
+}
+
 void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site, short is_pre) {
     if (!is_record_assign_site) {
+        return;
+    }
+
+    if (!is_focusing_assign_pattern(assign_obj, assigned_obj)) {
         return;
     }
 
@@ -1246,9 +1254,9 @@ void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
         strcat(path, "; ");
 
         if (i != traced_objs_tail_index) {
-            if (is_record_assign_site) {
+            LISP next_traced_obj = traced_objs[i + 1];
+            if (is_record_assign_site && is_focusing_assign_pattern(current_traced_obj, next_traced_obj)) {
                 char line_num_str[15] = "";
-                LISP next_traced_obj = traced_objs[i + 1];
 
                 switch (current_traced_obj->type) {
                     case tc_cons:
