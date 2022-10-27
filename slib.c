@@ -146,20 +146,21 @@ long stack_size =
         50000;
 #endif
 
-// 用来记录所有的待调查类型
-static char **focusing_types = NULL;
-static long latest_index_of_focusing_types = -1L;
-#define FOCUSING_TYPE_STR_LEN 20
-#define FOCUSING_TYPES_LEN 10000
+// 用来记录所有的关注的索引路径
+typedef struct {
+    short type;
+    char *cons_class_tag;
+} LObjType;
 
-// 用来记录所有的参照模式
-static char **focusing_ref_patterns = NULL;
-static long latest_index_of_focusing_ref_patterns = -1L;
-#define FOCUSING_REF_PATTERN_STR_LEN 40
-#define FOCUSING_REF_PATTERNS_LEN 10000
+typedef struct {
+    LObjType *objs_in_path;
+    long length;
+} RefPath;
+#define REF_PATH_INIT_SIZE 10000
 
-#define INPUT_REF_PATTERN_STR_LEN 100
-
+static RefPath *focusing_ref_paths = NULL;
+static long latest_index_focusing_ref_paths = -1L;
+#define FOCUSING_REF_PATHS_INIT_SIZE 10000
 
 // for recording gc marked objects
 static LISP *traced_objs = NULL;
@@ -178,18 +179,20 @@ void gen_focusing_type_str(char *dest, LISP ptr) {
 }
 
 int is_focusing_ref_pattern(LISP assign_obj, LISP assigned_obj) {
-    char assign_obj_type_str[FOCUSING_TYPE_STR_LEN] = "";
-    char assigned_obj_type_str[FOCUSING_TYPE_STR_LEN] = "";
-    gen_focusing_type_str(assign_obj_type_str, assign_obj);
-    gen_focusing_type_str(assigned_obj_type_str, assigned_obj);
-
-    char tmp[FOCUSING_REF_PATTERN_STR_LEN] = "";
-    strcpy(tmp, assign_obj_type_str);
-    strcat(tmp, "->");
-    strcat(tmp, assigned_obj_type_str);
-
-    for (int i = 0; i <= latest_index_of_focusing_ref_patterns; ++i) {
-        if (0 == strcmp(focusing_ref_patterns[i], tmp)) {
+    for (long i = 0; i <= latest_index_focusing_ref_paths; ++i) {
+        RefPath refPath = focusing_ref_paths[i];
+        for (long j = 0; j < refPath.length - 1; ++j) {
+            LObjType tmp_assign_obj = refPath.objs_in_path[j];
+            LObjType tmp_assigned_obj = refPath.objs_in_path[j + 1];
+            if (assign_obj->type != tmp_assign_obj.type || assigned_obj->type != tmp_assigned_obj.type) {
+                continue;
+            }
+            if (assign_obj->type == tc_cons && (0 != strcmp(assign_obj->storage_as.cons.class_tag, tmp_assign_obj.cons_class_tag))) {
+                continue;
+            }
+            if (assigned_obj->type == tc_cons && (0 != strcmp(assigned_obj->storage_as.cons.class_tag, tmp_assigned_obj.cons_class_tag))) {
+                continue;
+            }
             return 1;
         }
     }
@@ -727,168 +730,12 @@ LISP assert_dead(LISP ptr) {
     if (NULLP(ptr)) {
         return err("Null Pointer!", ptr);
     }
-    ptr->assert_dead = 1;
-    return (NIL);
-}
 
-LISP assert_dead_type(LISP type_str) {
-    if (!TYPEP(type_str, tc_string)) {
-        return err("Not a string!", type_str);
+    if (ptr->assert_dead || ptr->assert_dead == HAD_BEEN_ASSERTED) {
+        return (NIL);
     }
 
-    char str[FOCUSING_TYPE_STR_LEN] = "";
-    strcpy(str, type_str->storage_as.string.data);
-
-    short type = 0;
-    char *class_tag = "";
-
-    if (NULL != strstr(str, "(") || NULL != strstr(str, ")")) {
-        if (NULL == strstr(str, "(") || NULL == strstr(str, ")")) {
-            return err("Wrong type string!", type_str);
-        }
-
-        char *tmp = strtok(str, "(");
-        if (0 != strcmp(tmp, TYPE_STR_CONS)) {
-            return err("Wrong type string!", type_str);
-        }
-
-        type = tc_cons;
-        tmp = strtok(NULL, "(");
-        tmp = strtok(tmp, ")");
-        class_tag = tmp;
-    } else {
-        if (0 == strcmp(str, TYPE_STR_FLONUM)) {
-            type = tc_flonum;
-        } else if (0 == strcmp(str, TYPE_STR_SYMBOL)) {
-            type = tc_symbol;
-        } else if (0 == strcmp(str, TYPE_STR_CLOSURE)) {
-            type = tc_closure;
-        } else if (0 == strcmp(str, TYPE_STR_STRING)) {
-            type = tc_string;
-        } else if (0 == strcmp(str, TYPE_STR_FILE)) {
-            type = tc_c_file;
-        } else {
-            return err("Wrong type string!", type_str);
-        }
-    }
-
-    if (NULL == focusing_types) {
-        focusing_types = (char **) malloc(sizeof(char[FOCUSING_TYPE_STR_LEN]) * FOCUSING_TYPES_LEN);
-    }
-
-    char *focusing_type_str = (char *) malloc(sizeof(char) * FOCUSING_TYPE_STR_LEN);
-    char type_num[5] = "";
-    sprintf(type_num, "%d", type);
-    strcpy(focusing_type_str, type_num);
-    strcat(focusing_type_str, "&");
-    strcat(focusing_type_str, class_tag);
-
-    focusing_types[++latest_index_of_focusing_types] = focusing_type_str;
-    return (NIL);
-}
-
-LISP assert_ref_pattern(LISP ref_pattern) {
-    if (!TYPEP(ref_pattern, tc_string)) {
-        return err("Not a string!", ref_pattern);
-    }
-
-    char ref_pattern_str[INPUT_REF_PATTERN_STR_LEN] = "";
-    strcpy(ref_pattern_str, ref_pattern->storage_as.string.data);
-
-    char refs[100][FOCUSING_TYPE_STR_LEN];
-    int latest_refs_index = -1;
-    char *cur_ref = strtok(ref_pattern_str, "->");
-    strcpy(refs[++latest_refs_index], cur_ref);
-    while ((cur_ref = strtok(NULL, "->"))) {
-        strcpy(refs[++latest_refs_index], cur_ref);
-    }
-
-    for (int i = 0; i <= latest_refs_index; ++i) {
-        char tmp[FOCUSING_TYPE_STR_LEN] = "";
-        strcpy(tmp, refs[i]);
-        if (NULL == tmp) {
-            return err("Wrong ref pattern string!", ref_pattern);
-        }
-
-        if (NULL != strstr(tmp, "(") || NULL != strstr(tmp, ")")) {
-            if (NULL == strstr(tmp, "(") || NULL == strstr(tmp, ")")) {
-                return err("Wrong ref pattern string!", ref_pattern);
-            }
-
-            char *tmp_cons_str = strtok(tmp, "(");
-            if (0 != strcmp(tmp_cons_str, TYPE_STR_CONS)) {
-                return err("Wrong type string!", ref_pattern);
-            }
-
-            tmp_cons_str = strtok(NULL, "(");
-            if (NULL == strtok(tmp_cons_str, ")")) {
-                return err("Wrong type string!", ref_pattern);
-            }
-        } else {
-            if (0 != strcmp(tmp, TYPE_STR_FLONUM)
-                && 0 != strcmp(tmp, TYPE_STR_SYMBOL)
-                && 0 != strcmp(tmp, TYPE_STR_CLOSURE)
-                && 0 != strcmp(tmp, TYPE_STR_STRING)
-                && 0 != strcmp(tmp, TYPE_STR_FILE)) {
-                return err("Wrong type string!", ref_pattern);
-            }
-        }
-    }
-
-    char lts[FOCUSING_TYPE_STR_LEN] = "";
-    for (int i = 0; i <= latest_refs_index; ++i) {
-        char *ts = refs[i];
-
-        short type = 0;
-        char *class_tag = "";
-        if (NULL != strstr(ts, "(")) {
-            type = tc_cons;
-            ts = strtok(ts, "(");
-            ts = strtok(NULL, "(");
-            ts = strtok(ts, ")");
-            class_tag = ts;
-        } else {
-            if (0 == strcmp(ts, TYPE_STR_FLONUM)) {
-                type = tc_flonum;
-            } else if (0 == strcmp(ts, TYPE_STR_SYMBOL)) {
-                type = tc_symbol;
-            } else if (0 == strcmp(ts, TYPE_STR_CLOSURE)) {
-                type = tc_closure;
-            } else if (0 == strcmp(ts, TYPE_STR_STRING)) {
-                type = tc_string;
-            } else {
-                type = tc_c_file;
-            }
-        }
-
-        if (NULL == focusing_ref_patterns) {
-            focusing_ref_patterns = (char **) malloc(sizeof(char[FOCUSING_REF_PATTERN_STR_LEN]) * FOCUSING_REF_PATTERNS_LEN);
-        }
-
-        char cur_pat_str[FOCUSING_TYPE_STR_LEN] = "";
-        char type_num[5] = "";
-        sprintf(type_num, "%d", type);
-        strcpy(cur_pat_str, type_num);
-        strcat(cur_pat_str, "&");
-        strcat(cur_pat_str, class_tag);
-
-        if (0 != i) {
-            char *ref_pat_str = (char *) malloc(sizeof(char) * FOCUSING_REF_PATTERN_STR_LEN);
-            strcpy(ref_pat_str, lts);
-            strcat(ref_pat_str, "->");
-            strcat(ref_pat_str, cur_pat_str);
-            focusing_ref_patterns[++latest_index_of_focusing_ref_patterns] = ref_pat_str;
-        }
-
-        strcpy(lts, cur_pat_str);
-    }
-
-    if (NULL == focusing_types) {
-        focusing_types = (char **) malloc(sizeof(char[FOCUSING_TYPE_STR_LEN]) * FOCUSING_TYPES_LEN);
-    }
-    char *focusing_type_str = (char *) malloc(sizeof(char) * FOCUSING_TYPE_STR_LEN);
-    strcpy(focusing_type_str, lts);
-    focusing_types[++latest_index_of_focusing_types] = focusing_type_str;
+    ptr->assert_dead = HAS_BEEN_ASSERTED;
     return (NIL);
 }
 
@@ -1323,33 +1170,33 @@ void get_type_detail(char *res, LISP ptr) {
             if (NULL == ptr->storage_as.cons.class_tag) {
                 return;
             }
-            strcat(res, "(\"");
+            strcat(res, "(");
             strcat(res, ptr->storage_as.cons.class_tag);
-            strcat(res, "\")");
+            strcat(res, ")");
             return;
         case tc_flonum:
             strcpy(res, TYPE_STR_FLONUM);
             return;
         case tc_symbol:
             strcpy(res, TYPE_STR_SYMBOL);
-            strcat(res, "(\"");
+            strcat(res, "(");
             strcat(res, ptr->storage_as.symbol.pname);
-            strcat(res, "\")");
+            strcat(res, ")");
             return;
         case tc_closure:
             strcpy(res, TYPE_STR_CLOSURE);
             return;
         case tc_string:
             strcpy(res, TYPE_STR_STRING);
-            strcat(res, "(\"");
+            strcat(res, "(");
             strcat(res, ptr->storage_as.string.data);
-            strcat(res, "\")");
+            strcat(res, ")");
             return;
         case tc_c_file:
             strcpy(res, TYPE_STR_FILE);
-            strcat(res, "(\"");
+            strcat(res, "(");
             strcat(res, ptr->storage_as.c_file.name);
-            strcat(res, "\")");
+            strcat(res, ")");
             return;
         default:
             strcpy(res, TYPE_STR_NO_SUCH_TYPE);
@@ -1362,6 +1209,72 @@ void get_type_detail(char *res, LISP ptr) {
 void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
     if (NULL == traced_objs) {
         printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"process_dead_marked_obj()\")\n\033[0m");
+        return;
+    }
+
+    char res[40] = "";
+    get_type_detail(res, ptr);
+
+    long path_info_length = 1L;
+    path_info_length += traced_objs_tail_index < 0 ? 0 : traced_objs_tail_index;
+
+    /**
+     * e.g.
+     * TYPE0; ->
+     * TYPE1; ->
+     * ...
+     */
+    char path[path_info_length * (40 + 10)];
+    memset(path, 0, sizeof(path));
+
+    RefPath *refPath = (RefPath *) malloc(sizeof(RefPath));
+
+    for (long i = 0; i <= traced_objs_tail_index; i++) {
+        LISP current_traced_obj = traced_objs[i];
+        if (current_traced_obj->type == tc_cons
+            && strcmp(current_traced_obj->storage_as.cons.class_tag, INTERNAL_CONS) == 0) {
+            continue;
+        }
+
+        char tp[40] = "";
+        get_type_detail(tp, current_traced_obj);
+        strcat(path, tp);
+        strcat(path, "; ");
+
+        if (i != traced_objs_tail_index) {
+            strcat(path, "->\n");
+        }
+
+        if (NULL == refPath->objs_in_path) {
+            refPath->length = 0;
+            refPath->objs_in_path = (LObjType *) malloc(sizeof(LObjType) * REF_PATH_INIT_SIZE);
+        }
+        LObjType *tmpLObjType = (LObjType *) malloc(sizeof(LObjType));
+        tmpLObjType->type = current_traced_obj->type;
+        if (current_traced_obj->type == tc_cons) {
+            tmpLObjType->cons_class_tag = current_traced_obj->storage_as.cons.class_tag;
+        }
+        refPath->objs_in_path[refPath->length] = *tmpLObjType;
+        ++refPath->length;
+    }
+
+    printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
+           "Type: %s;\nPath to object: %s\n\n\033[0m",
+           res, path);
+
+    if (NULL == focusing_ref_paths) {
+        focusing_ref_paths = (RefPath *) malloc(sizeof(RefPath) * FOCUSING_REF_PATHS_INIT_SIZE);
+    }
+    focusing_ref_paths[++latest_index_focusing_ref_paths] = *refPath;
+
+    ptr->assert_dead = HAD_BEEN_ASSERTED;
+
+    printf("\033[31mStep one (Rough information about object in type: %s) is finished.\n\n\033[0m", res);
+}
+
+void process_focusing_type_obj(LISP ptr, long traced_objs_tail_index) {
+    if (NULL == traced_objs) {
+        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"process_focusing_type_obj()\")\n\033[0m");
         return;
     }
 
@@ -1433,34 +1346,27 @@ void process_dead_marked_obj(LISP ptr, long traced_objs_tail_index) {
     printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
            "Type: %s;\nPath to object: %s\n\n\033[0m",
            res, path);
+
+    printf("\033[31mStep two (Detailed information about object in type: %s) is finished.\n\n\033[0m", res);
 }
 
 int is_focusing_type(LISP ptr) {
-    if (NULL == focusing_types || latest_index_of_focusing_types < 0) {
+    if (NULL == focusing_ref_paths || latest_index_focusing_ref_paths < 0) {
         return 0;
     }
 
-    char ptr_type[5] = "";
-    sprintf(ptr_type, "%d", ptr->type);
-    char *cons_class_tag = "";
-    if (ptr->type == tc_cons) {
-        cons_class_tag = ptr->storage_as.cons.class_tag;
-    }
-
-    for (int i = 0; i <= latest_index_of_focusing_types; ++i) {
-        char current_focusing_type[FOCUSING_TYPE_STR_LEN] = "";
-        strcpy(current_focusing_type, focusing_types[i]);
-        char *tmp = strtok(current_focusing_type, "&");
-        if (0 != strcmp(ptr_type, tmp)) {
+    for (int i = 0; i <= latest_index_focusing_ref_paths; ++i) {
+        RefPath refPath = focusing_ref_paths[i];
+        if (NULL == refPath.objs_in_path || refPath.length <= 0) {
             continue;
         }
 
-        if (ptr->type != tc_cons) {
-            return 1;
+        LObjType lObjType = refPath.objs_in_path[refPath.length - 1];
+        if (ptr->type != lObjType.type) {
+            continue;
         }
 
-        tmp = strtok(NULL, "&");
-        if (0 != strcmp(cons_class_tag, tmp)) {
+        if (ptr->type == tc_cons && (0 != strcmp(ptr->storage_as.cons.class_tag, lObjType.cons_class_tag))) {
             continue;
         }
 
@@ -1493,8 +1399,13 @@ void gc_mark(LISP ptr, long traced_objs_tail_index) {
     traced_objs[traced_objs_tail_index] = ptr;
 
     // assert_dead check
-    if (ptr->assert_dead || is_focusing_type(ptr)) {
+    if (ptr->assert_dead) {
         process_dead_marked_obj(ptr, traced_objs_tail_index);
+    }
+
+    // assert_dead check
+    if (is_focusing_type(ptr)) {
+        process_focusing_type_obj(ptr, traced_objs_tail_index);
     }
 
     switch ((*ptr).type) {
@@ -2662,8 +2573,6 @@ void init_subrs_1(void) {
     init_subr_0("allocate-heap", allocate_aheap);
     init_subr_1("gc-info", gc_info);
     init_subr_1("assert-dead", assert_dead);
-    init_subr_1("assert-dead-type", assert_dead_type);
-    init_subr_1("assert-ref-pattern", assert_ref_pattern);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */

@@ -3,9 +3,7 @@
 (let ((y (cons 1 2 "MyCons" 3)))
   (let ((func1 (lambda (x) (+ x y) 4)))
     (begin
-      (assert-ref-pattern "SYMBOL->CLOSURE->CONS(MyCons)")
+      (assert-dead y)
       (set! x func1 7))))
 
 (gc)
-
-;; (assert-ref-pattern "SYMBOL->CLOSURE->CONS(MyCons)")

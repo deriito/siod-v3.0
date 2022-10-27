@@ -9,7 +9,7 @@
 struct obj {
     short gc_mark;
     short type;
-    // for assert_dead
+    // for assert-dead
     short assert_dead;
 
     union {
@@ -172,6 +172,10 @@ struct obj {
 #define TYPE_STR_STRING "STRING"
 #define TYPE_STR_FILE "FILE"
 #define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
+
+// for object's assert_dead mark
+#define HAS_BEEN_ASSERTED 1
+#define HAD_BEEN_ASSERTED (-1)
 
 typedef struct obj *LISP;
 
