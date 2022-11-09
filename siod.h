@@ -9,17 +9,18 @@
 struct obj {
     short gc_mark;
     short type;
-    // for assert-dead
-    short assert_dead;
+    short assertDeadMark; // assert-dead mark
+    short isAssignInfoRecorded; // 是否记录了代入信息的标记
+    int assertedDeadAt; // 记录被assert-dead所mark的, 在source code中的位置
 
     union {
         struct {
             struct obj *car;
-            long car_assign_site;
+            int carAssignSite;
             struct obj *cdr;
-            long cdr_assign_site;
-            char *class_tag;
-            short is_env_cons;
+            int cdrAssignSite;
+            char *classTag;
+            short userDefinedConsP; // 1: user defined cons, (<= 0): internal cons, (-1): env cons
         } cons;
 
         struct {
@@ -29,7 +30,7 @@ struct obj {
         struct {
             char *pname;
             struct obj *vcell;
-            long vcell_assign_site;
+            int vcellAssignSite;
         } symbol;
 
         struct {
@@ -69,9 +70,9 @@ struct obj {
 
         struct {
             struct obj *env;
-            long env_assign_site;
+            long envAssignSite;
             struct obj *code;
-            long code_assign_site;
+            long codeAssignSite;
         } closure;
 
         struct {
@@ -162,20 +163,6 @@ struct obj {
 #define FO_listd 124
 
 #define tc_table_dim 100
-
-#define INTERNAL_CONS "INTERNAL_CONS"
-
-#define TYPE_STR_CONS "CONS"
-#define TYPE_STR_FLONUM "FLONUM"
-#define TYPE_STR_SYMBOL "SYMBOL"
-#define TYPE_STR_CLOSURE "CLOSURE"
-#define TYPE_STR_STRING "STRING"
-#define TYPE_STR_FILE "FILE"
-#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
-
-// for object's assert_dead mark
-#define HAS_BEEN_ASSERTED 1
-#define HAD_BEEN_ASSERTED (-1)
 
 typedef struct obj *LISP;
 
@@ -441,3 +428,31 @@ long repl_c_string(char *, long want_sigint, long want_init, long want_print);
 char *siod_version(void);
 
 LISP nreverse(LISP);
+
+
+/**
+ * macros for gc assertion with new features
+ */
+
+// stages of "assert-dead" assertion
+#define ASSERT_DEAD_STAGE_ROUGH 1
+#define ASSERT_DEAD_STAGE_DETAILED 2
+
+// assert-dead mark
+#define HAS_BEEN_ASSERTED 1
+#define HAD_BEEN_ASSERTED (-1)
+
+// 内部的CONSと外部的CONSを区別するために
+#define INTERNAL_CONS_MARK 0
+#define ENV_CONS_MARK (-1) // ENV_CONSはINTERNAL_CONSの子集合である
+#define USER_DEFINED_CONS_MARK 1
+
+#define TYPE_STR_CONS "CONS"
+#define TYPE_STR_FLONUM "FLONUM"
+#define TYPE_STR_SYMBOL "SYMBOL"
+#define TYPE_STR_CLOSURE "CLOSURE"
+#define TYPE_STR_STRING "STRING"
+#define TYPE_STR_FILE "FILE"
+#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
+
+#define LONG_REF_PATH_THRESHOLD (10) // threshold of length of a long focusing reference path
