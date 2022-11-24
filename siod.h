@@ -9,19 +9,39 @@
 struct obj {
     short gc_mark;
     short type;
-    short assertDeadMark; // assert-dead mark
-    short isAssignInfoRecorded; // 是否记录了代入信息的标记
-    int assertedDeadAt; // 记录被assert-dead所mark的, 在source code中的位置
+    short assert_dead; // assert-dead mark
+    short is_assign_info_recorded;
+    int asserted_dead_at; // 记录被assert-dead所mark的, 在source code中的位置
 
     union {
         struct {
             struct obj *car;
-            int carAssignSite;
             struct obj *cdr;
-            int cdrAssignSite;
-            char *classTag;
-            short userDefinedConsP; // 1: user defined cons, (<= 0): internal cons, (-1): env cons
-        } cons;
+        } cons; // 内部cons
+
+        struct {
+            struct obj *car;
+            struct obj *cdr;
+        } excons; // 外部cons
+
+        struct {
+            struct obj *car;
+            int car_assign_site;
+            struct obj *cdr;
+        } excons_with_car_rec;
+
+        struct {
+            struct obj *car;
+            struct obj *cdr;
+            int cdr_assign_site;
+        } excons_with_cdr_rec;
+
+        struct {
+            struct obj *car;
+            int car_assign_site;
+            struct obj *cdr;
+            int cdr_assign_site;
+        } excons_with_both_rec;
 
         struct {
             double data;
@@ -30,7 +50,7 @@ struct obj {
         struct {
             char *pname;
             struct obj *vcell;
-            int vcellAssignSite;
+            int vcell_assign_site;
         } symbol;
 
         struct {
@@ -70,9 +90,9 @@ struct obj {
 
         struct {
             struct obj *env;
-            long envAssignSite;
+            long env_assign_site;
             struct obj *code;
-            long codeAssignSite;
+            long code_assign_site;
         } closure;
 
         struct {
@@ -99,6 +119,19 @@ struct obj {
             FILE *f;
             char *name;
         } c_file;
+
+        struct {
+            long dim;
+            struct obj **data;
+        } lisp_struct;
+
+        struct {
+            long dim;
+            struct obj **data;
+            long length;
+            long *assign_field_indexes;
+            long *assign_sites;
+        } lisp_struct_with_rec;
     } storage_as;
 };
 
@@ -145,6 +178,13 @@ struct obj {
 #define tc_lisp_array   16
 #define tc_c_file       17
 #define tc_subr_4 18
+#define tc_excons 19
+#define tc_excons_with_car_rec 20
+#define tc_excons_with_cdr_rec 21
+#define tc_excons_with_both_rec 22
+#define tc_lisp_struct 23
+#define tc_lisp_struct_with_rec 24
+
 #define tc_user_1 50
 #define tc_user_2 51
 #define tc_user_3 52
@@ -168,11 +208,11 @@ typedef struct obj *LISP;
 
 typedef LISP (*SUBR_FUNC)(void);
 
-#define CONSP(x)   TYPEP(x,tc_cons)
+#define CONSP(x) TYPEP(x,tc_cons)
 #define FLONUMP(x) TYPEP(x,tc_flonum)
 #define SYMBOLP(x) TYPEP(x,tc_symbol)
 
-#define NCONSP(x)   NTYPEP(x,tc_cons)
+#define NCONSP(x) NTYPEP(x,tc_cons)
 #define NFLONUMP(x) NTYPEP(x,tc_flonum)
 #define NSYMBOLP(x) NTYPEP(x,tc_symbol)
 
@@ -234,7 +274,7 @@ LISP newcell(long type);
 
 LISP cons(LISP x, LISP y);
 
-LISP external_cons(LISP x, LISP y, LISP custom_tag, LISP line_num);
+LISP external_cons(LISP x, LISP y, LISP line_num);
 
 LISP consp(LISP x);
 
@@ -429,6 +469,8 @@ char *siod_version(void);
 
 LISP nreverse(LISP);
 
+LISP define_structure(LISP name, LISP fields);
+
 
 /**
  * macros for gc assertion with new features
@@ -442,11 +484,6 @@ LISP nreverse(LISP);
 #define HAS_BEEN_ASSERTED 1
 #define HAD_BEEN_ASSERTED (-1)
 
-// 内部的CONSと外部的CONSを区別するために
-#define INTERNAL_CONS_MARK 0
-#define ENV_CONS_MARK (-1) // ENV_CONSはINTERNAL_CONSの子集合である
-#define USER_DEFINED_CONS_MARK 1
-
 #define TYPE_STR_CONS "CONS"
 #define TYPE_STR_FLONUM "FLONUM"
 #define TYPE_STR_SYMBOL "SYMBOL"
@@ -456,3 +493,10 @@ LISP nreverse(LISP);
 #define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
 
 #define LONG_REF_PATH_THRESHOLD (10) // threshold of length of a long focusing reference path
+
+// data structure field type ids
+#define CONS_CAR_TYPE_ID 0
+#define CONS_CDR_TYPE_ID 1
+#define SYMBOL_VCELL_TYPE_ID 0
+#define CLOSURE_CODE_TYPE_ID 0
+#define CLOSURE_ENV_TYPE_ID 1

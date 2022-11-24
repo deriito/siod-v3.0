@@ -64,7 +64,7 @@ LISP array_gc_mark(LISP ptr) {
     long j;
     if TYPEP(ptr, tc_lisp_array)
         for (j = 0; j < ptr->storage_as.lisp_array.dim; ++j)
-            gc_mark(ptr->storage_as.lisp_array.data[j], -1L);
+            gc_mark(ptr->storage_as.lisp_array.data[j], -1L, -1);
     return (NIL);
 }
 
@@ -832,7 +832,7 @@ LISP make_list_logic(LISP x, LISP v, LISP custom_tag, LISP line_num, short is_ex
     l = NIL;
     while (n > 0) {
         if (is_extenal) {
-            l = external_cons(v, l, custom_tag, line_num);
+            l = external_cons(v, l, line_num);
         } else {
             l = cons(v, l);
         }

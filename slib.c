@@ -148,76 +148,83 @@ long stack_size =
         50000;
 #endif
 
-// for recording assign_site
-short recordingAssignSiteOn = 1;
+// 行号记录功能是否开启的总开关
+short recording_assign_site_on = 1;
 
-// for recording collector traced objects
-static LISP *gcTracedObjs = NULL;
+// 用于记录标记过的对象
+static LISP *gc_traced_objs = NULL;
+// 与gc_traced_objs的元素一一对应，用于记录具体是哪个field指向了下一个对象
+static int *gc_traced_obj_fields = NULL;
 
 // 参照パスの各要素のデータ構造
 typedef struct {
-    short lispObjType;
-    char *consClassTag;
-    short isActivate; // 用于标记分段激活的代入对(即，当前带有标记的type->下一个type)
+    short lisp_obj_type;
+    int assign_slot_type;
+    short activatep; // 用于标记分段激活的代入对(即，当前带有标记的type->下一个type)
 } RefPathElement;
 
 // 各个位置的assert-dead的调用信息以及收集的参照パス
 typedef struct {
-    int lineNum;
+    int line_num;
     short stage;
-    UT_array *refPath;
+    UT_array *ref_path;
     UT_hash_handle hh; /* makes this structure hashtable */
 } AssertDeadInfo;
 
 // assert-dead的相关信息
-static AssertDeadInfo *assertDeadInfoTable = NULL;
+static AssertDeadInfo *assert_dead_info_table = NULL;
 
-short judgeRefPattern(LISP assignObj, LISP assignedObj, RefPathElement *assignElement, RefPathElement *assignedElement) {
-    if (assignObj->type != assignElement->lispObjType || assignedObj->type != assignedElement->lispObjType) {
+typedef struct {
+    int original_type;
+    int replaced_type;
+    UT_hash_handle hh; /* makes this structure hashtable */
+} DynamicTypeReplaceInfo;
+
+// 记录需要动态替换类型的信息
+static DynamicTypeReplaceInfo *dynamic_type_replace_info_table = NULL;
+
+short both_exconsp(short type1, short type2) {
+    if (tc_excons <= type1 && type1 <= tc_excons_with_both_rec) {
+        if (tc_excons <= type2 && type2 <= tc_excons_with_both_rec) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assign_element, RefPathElement *assigned_element) {
+    if (assign_obj->type != assign_element->lisp_obj_type && !both_exconsp(assign_obj->type, assign_element->lisp_obj_type)) {
         return 0;
     }
-    if (assignObj->type == tc_cons) {
-        if (!assignObj->storage_as.cons.userDefinedConsP) {
-            return 0;
-        }
-        if (0 != strcmp(assignObj->storage_as.cons.classTag, assignElement->consClassTag)) {
-            return 0;
-        }
-    }
-    if (assignedObj->type == tc_cons) {
-        if (!assignedObj->storage_as.cons.userDefinedConsP) {
-            return 0;
-        }
-        if (0 != strcmp(assignedObj->storage_as.cons.classTag, assignedElement->consClassTag)) {
-            return 0;
-        }
+    if (assigned_obj->type != assigned_element->lisp_obj_type && !both_exconsp(assigned_obj->type, assigned_element->lisp_obj_type)) {
+        return 0;
     }
     return 1;
 }
 
-short isFocusingRefPattern(LISP assignObj, LISP assignedObj) {
-    AssertDeadInfo *tmpAssertDeadInfo;
-    for (tmpAssertDeadInfo = assertDeadInfoTable; tmpAssertDeadInfo != NULL; tmpAssertDeadInfo = tmpAssertDeadInfo->hh.next) {
-        UT_array *refPath = tmpAssertDeadInfo->refPath;
-        if (NULL == refPath) {
+short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
+    AssertDeadInfo *tmp_assert_dead_info;
+    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
+        UT_array *ref_path = tmp_assert_dead_info->ref_path;
+        if (NULL == ref_path) {
             continue;
         }
 
-        int refPathLength = utarray_len(refPath);
-        if (refPathLength <= LONG_REF_PATH_THRESHOLD) {
-            for (int i = 0; i < refPathLength - 1; ++i) {
-                RefPathElement *assignElement = utarray_eltptr(refPath, i);
-                RefPathElement *assignedElement = utarray_eltptr(refPath, i + 1);
-                if (judgeRefPattern(assignObj, assignedObj, assignElement, assignedElement)) {
+        int ref_path_length = utarray_len(ref_path);
+        if (ref_path_length <= LONG_REF_PATH_THRESHOLD) {
+            for (int i = 0; i < ref_path_length - 1; ++i) {
+                RefPathElement *assign_element = utarray_eltptr(ref_path, i);
+                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1);
+                if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
                     return 1;
                 }
             }
         } else { // TODO 分段的代入记录的完善
-            for (int i = 0; i < refPathLength - 1; ++i) {
-                RefPathElement *assignElement = utarray_eltptr(refPath, i);
-                RefPathElement *assignedElement = utarray_eltptr(refPath, i + 1);
-                if (assignElement->isActivate) {
-                    if (judgeRefPattern(assignObj, assignedObj, assignElement, assignedElement)) {
+            for (int i = 0; i < ref_path_length - 1; ++i) {
+                RefPathElement *assign_element = utarray_eltptr(ref_path, i);
+                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1);
+                if (assign_element->activatep) {
+                    if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
                         return 1;
                     }
                 }
@@ -227,47 +234,58 @@ short isFocusingRefPattern(LISP assignObj, LISP assignedObj) {
     return 0;
 }
 
-void tryRecordAssignSite(LISP assignObj, LISP assignedObj, long assignSite, short isPre) {
-    if (!recordingAssignSiteOn) {
+void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site, short isPre) {
+    if (!recording_assign_site_on) {
         return;
     }
 
-    if (NULL == assignObj || NULL == assignedObj) {
+    if (NULL == assign_obj || NULL == assigned_obj) {
         return;
     }
 
-    // INTERNAL_CONSを無視する
-    while (assignedObj->type == tc_cons && !assignedObj->storage_as.cons.userDefinedConsP) {
-        assignedObj = CAR(assignedObj);
+    // 内部的CONSを無視する
+    while (NULL != assigned_obj && assigned_obj->type == tc_cons) {
+        assigned_obj = CAR(assigned_obj);
     }
 
-    if (!isFocusingRefPattern(assignObj, assignedObj)) {
+    if (!focusing_ref_patternp(assign_obj, assigned_obj)) {
         return;
     }
 
-    switch (assignObj->type) {
-        case tc_cons:
+    switch (assign_obj->type) {
+        case tc_excons_with_car_rec:
             if (isPre) {
-                assignObj->storage_as.cons.carAssignSite = assignSite;
+                assign_obj->storage_as.excons_with_car_rec.car_assign_site = assign_site;
+            }
+            break;
+        case tc_excons_with_cdr_rec:
+            if (isPre) {
+                break;
+            }
+            assign_obj->storage_as.excons_with_cdr_rec.cdr_assign_site = assign_site;
+            break;
+        case tc_excons_with_both_rec:
+            if (isPre) {
+                assign_obj->storage_as.excons_with_both_rec.car_assign_site = assign_site;
             } else {
-                assignObj->storage_as.cons.cdrAssignSite = assignSite;
+                assign_obj->storage_as.excons_with_both_rec.cdr_assign_site = assign_site;
             }
             break;
         case tc_symbol:
-            assignObj->storage_as.symbol.vcellAssignSite = assignSite;
+            assign_obj->storage_as.symbol.vcell_assign_site = assign_site;
             break;
         case tc_closure:
             if (isPre) {
-                assignObj->storage_as.closure.envAssignSite = assignSite;
+                assign_obj->storage_as.closure.env_assign_site = assign_site;
             } else {
-                assignObj->storage_as.closure.codeAssignSite = assignSite;
+                assign_obj->storage_as.closure.code_assign_site = assign_site;
             }
             break;
         default:
-            printf("\033[31mRuntime Exception: Why Here? (see \"tryRecordAssignSite()\")\n\033[0m");
+            return;
     }
 
-    assignObj->isAssignInfoRecorded = 1;
+    assign_obj->is_assign_info_recorded = 1;
 }
 
 void process_cla(int argc, char **argv, int warnflag) {
@@ -606,22 +624,48 @@ LISP cons(LISP x, LISP y) {
     return (z);
 }
 
-LISP env_cons(LISP x, LISP y) {
-    LISP result = cons(x, y);
-    result->storage_as.cons.userDefinedConsP = ENV_CONS_MARK;
-    return result;
-}
+LISP external_cons(LISP x, LISP y, LISP line_num) {
+    DynamicTypeReplaceInfo *dtri;
+    int excons_type_id = tc_excons;
+    HASH_FIND_INT(dynamic_type_replace_info_table, &excons_type_id, dtri);
 
-LISP external_cons(LISP x, LISP y, LISP custom_tag, LISP line_num) {
-    LISP new_cons = cons(x, y);
-    new_cons->storage_as.cons.userDefinedConsP = USER_DEFINED_CONS_MARK;
-    new_cons->storage_as.cons.classTag = get_c_string(custom_tag); // TODO string的内存占用还没有处理
-    if (recordingAssignSiteOn) {
-        long ln = (long) line_num->storage_as.flonum.data;
-        tryRecordAssignSite(new_cons, x, ln, 1);
-        tryRecordAssignSite(new_cons, y, ln, 0);
+    short new_excons_type_id;
+    if (NULL == dtri) {
+        new_excons_type_id = tc_excons;
+    } else {
+        new_excons_type_id = dtri->replaced_type;
     }
-    return (new_cons);
+
+    LISP new_excons;
+    NEWCELL(new_excons, new_excons_type_id);
+
+    switch (new_excons_type_id) {
+        case tc_excons:
+            new_excons->storage_as.excons.car = x;
+            new_excons->storage_as.excons.cdr = y;
+            break;
+        case tc_excons_with_car_rec:
+            new_excons->storage_as.excons_with_car_rec.car = x;
+            new_excons->storage_as.excons_with_car_rec.cdr = y;
+            break;
+        case tc_excons_with_cdr_rec:
+            new_excons->storage_as.excons_with_cdr_rec.car = x;
+            new_excons->storage_as.excons_with_cdr_rec.cdr = y;
+            break;
+        case tc_excons_with_both_rec:
+            new_excons->storage_as.excons_with_both_rec.car = x;
+            new_excons->storage_as.excons_with_both_rec.cdr = y;
+            break;
+        default:
+            return (err("see external_cons", (NIL)));
+    }
+
+    if (recording_assign_site_on) {
+        long ln = (long) line_num->storage_as.flonum.data;
+        try_record_assign_site(new_excons, x, ln, 1);
+        try_record_assign_site(new_excons, y, ln, 0);
+    }
+    return (new_excons);
 }
 
 LISP consp(LISP x) { if CONSP(x) return (truth); else return (NIL); }
@@ -632,6 +676,14 @@ LISP car(LISP x) {
             return (NIL);
         case tc_cons:
             return (CAR(x));
+        case tc_excons:
+            return ((*x).storage_as.excons.car);
+        case tc_excons_with_car_rec:
+            return ((*x).storage_as.excons_with_car_rec.car);
+        case tc_excons_with_cdr_rec:
+            return ((*x).storage_as.excons_with_cdr_rec.car);
+        case tc_excons_with_both_rec:
+            return ((*x).storage_as.excons_with_both_rec.car);
         default:
             return (err("wta to car", x));
     }
@@ -643,6 +695,14 @@ LISP cdr(LISP x) {
             return (NIL);
         case tc_cons:
             return (CDR(x));
+        case tc_excons:
+            return ((*x).storage_as.excons.car);
+        case tc_excons_with_car_rec:
+            return ((*x).storage_as.excons_with_car_rec.cdr);
+        case tc_excons_with_cdr_rec:
+            return ((*x).storage_as.excons_with_cdr_rec.cdr);
+        case tc_excons_with_both_rec:
+            return ((*x).storage_as.excons_with_both_rec.cdr);
         default:
             return (err("wta to cdr", x));
     }
@@ -655,8 +715,8 @@ LISP setcar(LISP cell, LISP value) {
 
 LISP setcar_exteral(LISP cell, LISP value, LISP line_num) {
     LISP result = setcar(cell, value);
-    if (recordingAssignSiteOn) {
-        tryRecordAssignSite(cell, value, (long) line_num->storage_as.flonum.data, 1);
+    if (recording_assign_site_on) {
+        try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 1);
     }
     return (result);
 }
@@ -668,8 +728,8 @@ LISP setcdr(LISP cell, LISP value) {
 
 LISP setcdr_exteral(LISP cell, LISP value, LISP line_num) {
     LISP result = setcdr(cell, value);
-    if (recordingAssignSiteOn) {
-        tryRecordAssignSite(cell, value, (long) line_num->storage_as.flonum.data, 0);
+    if (recording_assign_site_on) {
+        try_record_assign_site(cell, value, (long) line_num->storage_as.flonum.data, 0);
     }
     return (result);
 }
@@ -1187,17 +1247,14 @@ void gc_ms_stats_end(void) {
                gc_cells_collected);
 }
 
-void getTypeDetail(char *res, LISP ptr) {
+void translate_type_detail(char *res, LISP ptr) {
     short type = ptr->type;
     switch (type) {
-        case tc_cons:
+        case tc_excons:
+        case tc_excons_with_car_rec:
+        case tc_excons_with_cdr_rec:
+        case tc_excons_with_both_rec:
             strcpy(res, TYPE_STR_CONS);
-            if (NULL == ptr->storage_as.cons.classTag) {
-                return;
-            }
-            strcat(res, "(");
-            strcat(res, ptr->storage_as.cons.classTag);
-            strcat(res, ")");
             return;
         case tc_flonum:
             strcpy(res, TYPE_STR_FLONUM);
@@ -1231,98 +1288,124 @@ void getTypeDetail(char *res, LISP ptr) {
     }
 }
 
-void processAssertDeadStageOne(LISP ptr, long lastIndexOfGcTracedObjs) {
-    if (NULL == gcTracedObjs) {
-        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"processAssertDeadStageOne()\")\n\033[0m");
+int query_original_type(short type) {
+    if (tc_excons <= type && type <= tc_excons_with_both_rec) {
+        return tc_excons;
+    }
+
+    if (tc_lisp_struct <= type && type <= tc_lisp_struct_with_rec) {
+        return tc_lisp_struct;
+    }
+
+    return type;
+}
+
+void try_cache_dynamic_type_replace_info(short type, int selected_field) {
+    int original_type = query_original_type(type);
+
+    DynamicTypeReplaceInfo *dynamic_type_replace_info;
+    HASH_FIND_INT(dynamic_type_replace_info_table, &original_type, dynamic_type_replace_info);
+
+    if (NULL == dynamic_type_replace_info) {
+        dynamic_type_replace_info = (DynamicTypeReplaceInfo *) malloc(sizeof(DynamicTypeReplaceInfo));
+        dynamic_type_replace_info->original_type = original_type;
+        dynamic_type_replace_info->replaced_type = 0;
+        HASH_ADD_INT(dynamic_type_replace_info_table, original_type, dynamic_type_replace_info);
+    }
+
+    if (dynamic_type_replace_info->replaced_type == 0) {
+        switch (original_type) {
+            case tc_excons:
+                if (selected_field == CONS_CAR_TYPE_ID) {
+                    dynamic_type_replace_info->replaced_type = tc_excons_with_car_rec;
+                } else if (selected_field == CONS_CDR_TYPE_ID) {
+                    dynamic_type_replace_info->replaced_type = tc_excons_with_cdr_rec;
+                }
+                break;
+                // TODO lisp_struct
+            default:
+                break;
+        }
+    } else {
+        switch (dynamic_type_replace_info->replaced_type) {
+            case tc_excons_with_car_rec:
+                if (selected_field == CONS_CDR_TYPE_ID) {
+                    dynamic_type_replace_info->replaced_type = tc_excons_with_both_rec;
+                }
+                break;
+            case tc_excons_with_cdr_rec:
+                if (selected_field == CONS_CAR_TYPE_ID) {
+                    dynamic_type_replace_info->replaced_type = tc_excons_with_both_rec;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) {
+    if (NULL == gc_traced_objs) {
+        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"process_assert_dead_stage_one()\")\n\033[0m");
         exit(-1);
         return;
     }
 
-    char suspiciousTypeStr[40] = "";
-    getTypeDetail(suspiciousTypeStr, ptr);
-
-    long refPathInfoLength = 1L;
-    refPathInfoLength += lastIndexOfGcTracedObjs < 0 ? 0 : lastIndexOfGcTracedObjs;
-
-    /**
-     * e.g.
-     * TYPE0; ->
-     * TYPE1; ->
-     * ...
-     */
-    char refPathinfoStr[refPathInfoLength * (40 + 10)];
-    memset(refPathinfoStr, 0, sizeof(refPathinfoStr));
-
-    AssertDeadInfo *tmpAssertDeadInfo;
-    HASH_FIND_INT(assertDeadInfoTable, &(ptr->assertedDeadAt), tmpAssertDeadInfo);
-    if (NULL == tmpAssertDeadInfo) {
-        printf("\033[31mRuntime Exception: Why the tmpAssertDeadInfo is NULL? (see \"processAssertDeadStageOne()\")\n\033[0m");
+    AssertDeadInfo *tmp_assert_dead_info;
+    HASH_FIND_INT(assert_dead_info_table, &(ptr->asserted_dead_at), tmp_assert_dead_info);
+    if (NULL == tmp_assert_dead_info) {
+        printf("\033[31mRuntime Exception: Why the tmpAssertDeadInfo is NULL? (see \"process_assert_dead_stage_one()\")\n\033[0m");
         exit(-1);
         return;
     }
 
-    for (long i = 0; i <= lastIndexOfGcTracedObjs; i++) {
-        LISP currentTracedObj = gcTracedObjs[i];
-        if (currentTracedObj->type == tc_cons && !currentTracedObj->storage_as.cons.userDefinedConsP) {
+    for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
+        LISP current_traced_obj = gc_traced_objs[i];
+        if (current_traced_obj->type == tc_cons) {
             continue;
         }
 
-        char tp[40] = "";
-        getTypeDetail(tp, currentTracedObj);
-        strcat(refPathinfoStr, tp);
-        strcat(refPathinfoStr, "; ");
-
-        if (i != lastIndexOfGcTracedObjs) {
-            strcat(refPathinfoStr, "->\n");
-        }
-
         // 参照パスを記録しておく
-        RefPathElement *newRefPathElement = (RefPathElement *) malloc(sizeof(RefPathElement));
-        newRefPathElement->lispObjType = currentTracedObj->type;
-        newRefPathElement->consClassTag = (char *) malloc(sizeof(char) * 40);
-        newRefPathElement->isActivate = 0;
-        if (currentTracedObj->type == tc_cons) {
-            newRefPathElement->consClassTag = (char *) malloc(sizeof(char) * strlen(ptr->storage_as.cons.classTag));
-            strcpy(newRefPathElement->consClassTag, ptr->storage_as.cons.classTag);
+        RefPathElement *new_ref_path_element = (RefPathElement *) malloc(sizeof(RefPathElement));
+        new_ref_path_element->lisp_obj_type = current_traced_obj->type;
+        new_ref_path_element->assign_slot_type = gc_traced_obj_fields[i];
+        new_ref_path_element->activatep = 0;
+
+        if (NULL == tmp_assert_dead_info->ref_path) {
+            UT_icd ref_path_elements_icd = {sizeof(RefPathElement), NULL, NULL, NULL};
+            utarray_new(tmp_assert_dead_info->ref_path, &ref_path_elements_icd);
         }
 
-        if (NULL == tmpAssertDeadInfo->refPath) {
-            UT_icd refPathElements_icd = {sizeof(RefPathElement), NULL, NULL, NULL};
-            utarray_new(tmpAssertDeadInfo->refPath, &refPathElements_icd);
-        }
+        utarray_push_back(tmp_assert_dead_info->ref_path, new_ref_path_element);
 
-        utarray_push_back(tmpAssertDeadInfo->refPath, newRefPathElement);
+        // 動的型の切り替え情報を記録しておく
+        try_cache_dynamic_type_replace_info(current_traced_obj->type, gc_traced_obj_fields[i]);
     }
 
-    ptr->assertDeadMark = HAD_BEEN_ASSERTED;
-    tmpAssertDeadInfo->stage = ASSERT_DEAD_STAGE_DETAILED;
+    ptr->assert_dead = HAD_BEEN_ASSERTED;
+    tmp_assert_dead_info->stage = ASSERT_DEAD_STAGE_DETAILED;
 
-    printf("\033[31m*********************************Assert-Dead Stage One********************************\n\033[0m");
-    printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
-           "Type: %s;\nPath to object: %s\n\n\033[0m",
-           suspiciousTypeStr, refPathinfoStr);
-    printf("\033[31mStep one (\"Rough information about object in type: %s\") is finished.\n\033[0m", suspiciousTypeStr);
-    printf("\033[31m**************************************************************************************\n\n\033[0m");
+    printf("\033[31mAssert-Dead Stage One Done.\n\033[0m");
 }
 
-void lineLongToLineStr(char* dst, long lvalue) {
-    if (lvalue <= 0) {
+void translate_to_line_num_str(char* dst, long line_num) {
+    if (line_num <= 0) {
         return;
     }
-    sprintf(dst, "@ln%ld", lvalue);
+    sprintf(dst, "@ln%ld", line_num);
 }
 
-void processAssertDeadStageTwo(LISP ptr, long lastIndexOfGcTracedObjs) {
-    if (NULL == gcTracedObjs) {
-        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"processAssertDeadStageTwo()\")\n\033[0m");
+void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) {
+    if (NULL == gc_traced_objs) {
+        printf("\033[31mRuntime Exception: Why the traced_obj is NULL? (see \"process_assert_dead_stage_two()\")\n\033[0m");
         return;
     }
 
-    char res[40] = "";
-    getTypeDetail(res, ptr);
+    char suspect_type_str[40] = "";
+    translate_type_detail(suspect_type_str, ptr);
 
     long path_info_length = 1L;
-    path_info_length += lastIndexOfGcTracedObjs < 0 ? 0 : lastIndexOfGcTracedObjs;
+    path_info_length += last_index_of_gc_traced_objs < 0 ? 0 : last_index_of_gc_traced_objs;
 
     /**
      * e.g.
@@ -1330,74 +1413,82 @@ void processAssertDeadStageTwo(LISP ptr, long lastIndexOfGcTracedObjs) {
      * TYPE1; @ln10->
      * ...
      */
-    char path[(path_info_length + 1) * (40 + 10 + 10)];
-    memset(path, 0, sizeof(path));
+    char path_info[(path_info_length + 1) * (40 + 10 + 10)];
+    memset(path_info, 0, sizeof(path_info));
 
-    for (long i = 0; i <= lastIndexOfGcTracedObjs; i++) {
-        LISP currentTracedObj = gcTracedObjs[i];
-        if (currentTracedObj->type == tc_cons && !currentTracedObj->storage_as.cons.userDefinedConsP) {
+    for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
+        LISP current_traced_obj = gc_traced_objs[i];
+        if (current_traced_obj->type == tc_cons) {
             continue;
         }
 
-        char tp[40] = "";
-        getTypeDetail(tp, currentTracedObj);
-        strcat(path, tp);
-        strcat(path, "; ");
+        char tmpTypeStr[40] = "";
+        translate_type_detail(tmpTypeStr, current_traced_obj);
+        strcat(path_info, tmpTypeStr);
+        strcat(path_info, "; ");
 
-        if (i != lastIndexOfGcTracedObjs) {
-            LISP next_traced_obj = gcTracedObjs[i + 1];
-            if (recordingAssignSiteOn && currentTracedObj->isAssignInfoRecorded) {
+        if (i != last_index_of_gc_traced_objs) {
+            LISP next_traced_obj = gc_traced_objs[i + 1];
+            if (recording_assign_site_on && current_traced_obj->is_assign_info_recorded) {
                 char line_num_str[15] = "";
 
-                switch (currentTracedObj->type) {
-                    case tc_cons:
-                        if (currentTracedObj->storage_as.cons.car == next_traced_obj) {
-                            lineLongToLineStr(line_num_str, currentTracedObj->storage_as.cons.carAssignSite);
-                            strcat(path, line_num_str);
+                switch (current_traced_obj->type) {
+                    case tc_excons_with_car_rec:
+                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_car_rec.car_assign_site);
+                        strcat(path_info, line_num_str);
+                        break;
+                    case tc_excons_with_cdr_rec:
+                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_cdr_rec.cdr_assign_site);
+                        strcat(path_info, line_num_str);
+                        break;
+                    case tc_excons_with_both_rec:
+                        if (current_traced_obj->storage_as.excons_with_both_rec.car == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_both_rec.car_assign_site);
+                            strcat(path_info, line_num_str);
                         }
-                        if (currentTracedObj->storage_as.cons.cdr == next_traced_obj) {
-                            lineLongToLineStr(line_num_str, currentTracedObj->storage_as.cons.cdrAssignSite);
-                            strcat(path, line_num_str);
+                        if (current_traced_obj->storage_as.excons_with_both_rec.cdr == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_both_rec.cdr_assign_site);
+                            strcat(path_info, line_num_str);
                         }
                         break;
                     case tc_symbol:
-                        if (currentTracedObj->storage_as.symbol.vcell == next_traced_obj) {
-                            lineLongToLineStr(line_num_str, currentTracedObj->storage_as.symbol.vcellAssignSite);
-                            strcat(path, line_num_str);
+                        if (current_traced_obj->storage_as.symbol.vcell == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str,
+                                                      current_traced_obj->storage_as.symbol.vcell_assign_site);
+                            strcat(path_info, line_num_str);
                         }
                         break;
                     case tc_closure:
-                        if (currentTracedObj->storage_as.closure.env == next_traced_obj) {
-                            lineLongToLineStr(line_num_str, currentTracedObj->storage_as.closure.envAssignSite);
-                            strcat(path, line_num_str);
+                        if (current_traced_obj->storage_as.closure.env == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str,
+                                                      current_traced_obj->storage_as.closure.env_assign_site);
+                            strcat(path_info, line_num_str);
                         }
-                        if (currentTracedObj->storage_as.closure.code == next_traced_obj) {
-                            lineLongToLineStr(line_num_str, currentTracedObj->storage_as.closure.codeAssignSite);
-                            strcat(path, line_num_str);
+                        if (current_traced_obj->storage_as.closure.code == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str,
+                                                      current_traced_obj->storage_as.closure.code_assign_site);
+                            strcat(path_info, line_num_str);
                         }
                         break;
                 }
             }
-            strcat(path, "->\n");
+            strcat(path_info, "->\n");
         }
     }
 
-    printf("\033[31m*********************************Assert-Dead Stage Two********************************\n\033[0m");
     printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
            "Type: %s;\nPath to object: %s\n\n\033[0m",
-           res, path);
-    printf("\033[31mStep two (\"Detailed information about object in type: %s\") is finished.\n\033[0m", res);
-    printf("\033[31m**************************************************************************************\n\n\033[0m");
+           suspect_type_str, path_info);
 }
 
-short canProcessAssertDeadStageTwo(LISP ptr) {
-    AssertDeadInfo *tmpAssertDeadInfo;
-    for (tmpAssertDeadInfo = assertDeadInfoTable; tmpAssertDeadInfo != NULL; tmpAssertDeadInfo = tmpAssertDeadInfo->hh.next) {
-        if (tmpAssertDeadInfo->stage < ASSERT_DEAD_STAGE_DETAILED) {
+short can_process_assert_dead_stage_two(LISP ptr) {
+    AssertDeadInfo *tmp_assert_dead_info;
+    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
+        if (tmp_assert_dead_info->stage != ASSERT_DEAD_STAGE_DETAILED) {
             continue;
         }
 
-        UT_array *refPath = tmpAssertDeadInfo->refPath;
+        UT_array *refPath = tmp_assert_dead_info->ref_path;
         if (NULL == refPath) {
             continue;
         }
@@ -1407,18 +1498,12 @@ short canProcessAssertDeadStageTwo(LISP ptr) {
             continue;
         }
 
-        RefPathElement *tmpLastElement = utarray_back(refPath);
-        if (ptr->type != tmpLastElement->lispObjType) {
+        RefPathElement *tmp_last_element = utarray_back(refPath);
+        if (ptr->type != tmp_last_element->lisp_obj_type) {
+            if (both_exconsp(tmp_last_element->lisp_obj_type, ptr->type)) {
+                return 1;
+            }
             continue;
-        }
-
-        if (ptr->type == tc_cons) {
-            if (!ptr->storage_as.cons.userDefinedConsP) {
-                continue;
-            }
-            if (0 != strcmp(ptr->storage_as.cons.classTag, tmpLastElement->consClassTag)) {
-                continue;
-            }
         }
 
         return 1;
@@ -1427,55 +1512,55 @@ short canProcessAssertDeadStageTwo(LISP ptr) {
 }
 
 // assert-dead with new features
-LISP assertDead(LISP ptr, LISP ln) {
+LISP assert_dead(LISP ptr, LISP ln) {
     if (NULLP(ptr)) {
         return err("Null Pointer!", ptr);
     }
 
-    if (ptr->assertDeadMark || ptr->assertDeadMark == HAD_BEEN_ASSERTED) {
+    if (ptr->assert_dead || ptr->assert_dead == HAD_BEEN_ASSERTED) {
         return (NIL);
     }
 
-    int lineNum = (int) ln->storage_as.flonum.data;
+    int line_num = (int) ln->storage_as.flonum.data;
 
-    AssertDeadInfo *assertDeadInfo;
-    HASH_FIND_INT(assertDeadInfoTable, &lineNum, assertDeadInfo);
-    if (NULL != assertDeadInfo) {
+    AssertDeadInfo *assert_dead_info;
+    HASH_FIND_INT(assert_dead_info_table, &line_num, assert_dead_info);
+    if (NULL != assert_dead_info) {
         return (NIL);
     }
 
-    AssertDeadInfo *newAssertDeadInfo = (AssertDeadInfo *) malloc(sizeof(AssertDeadInfo));
-    newAssertDeadInfo->lineNum = lineNum;
-    newAssertDeadInfo->stage = ASSERT_DEAD_STAGE_ROUGH;
-    newAssertDeadInfo->refPath = NULL;
+    AssertDeadInfo *new_assert_dead_info = (AssertDeadInfo *) malloc(sizeof(AssertDeadInfo));
+    new_assert_dead_info->line_num = line_num;
+    new_assert_dead_info->stage = ASSERT_DEAD_STAGE_ROUGH;
+    new_assert_dead_info->ref_path = NULL;
 
-    HASH_ADD_INT(assertDeadInfoTable, lineNum, newAssertDeadInfo);
+    HASH_ADD_INT(assert_dead_info_table, line_num, new_assert_dead_info);
 
-    ptr->assertDeadMark = HAS_BEEN_ASSERTED;
-    ptr->assertedDeadAt = lineNum;
+    ptr->assert_dead = HAS_BEEN_ASSERTED;
+    ptr->asserted_dead_at = line_num;
     return (NIL);
 }
 
-short canProcessAssertDeadStageOne(LISP ptr) {
-    if (HAS_BEEN_ASSERTED != ptr->assertDeadMark) {
+short can_process_assert_dead_stage_one(LISP ptr) {
+    if (HAS_BEEN_ASSERTED != ptr->assert_dead) {
         return 0;
     }
 
-    int lineNum = ptr->assertedDeadAt;
-    AssertDeadInfo *tmpAssertDeadInfo;
-    HASH_FIND_INT(assertDeadInfoTable, &lineNum, tmpAssertDeadInfo);
-    if (NULL == tmpAssertDeadInfo) {
+    int line_num = ptr->asserted_dead_at;
+    AssertDeadInfo *tmp_assert_dead_info;
+    HASH_FIND_INT(assert_dead_info_table, &line_num, tmp_assert_dead_info);
+    if (NULL == tmp_assert_dead_info) {
         return 0;
     }
 
-    if (ASSERT_DEAD_STAGE_ROUGH != tmpAssertDeadInfo->stage) {
+    if (ASSERT_DEAD_STAGE_ROUGH != tmp_assert_dead_info->stage) {
         return 0;
     }
 
     return 1;
 }
 
-void gc_mark(LISP ptr, long lastIndexOfGcTracedObjs) {
+void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, int previous_obj_selected_field) {
     struct user_type_hooks *p;
 
     gc_mark_loop:
@@ -1489,34 +1574,42 @@ void gc_mark(LISP ptr, long lastIndexOfGcTracedObjs) {
 
     (*ptr).gc_mark = 1;
 
-    // recoding mark info that is for output of the full reference path
-    if (NULL == gcTracedObjs) {
-        gcTracedObjs = (LISP *) malloc(sizeof(LISP *) * heap_size);
+    if (NULL == gc_traced_objs || NULL == gc_traced_obj_fields) {
+        gc_traced_objs = (LISP *) malloc(sizeof(LISP *) * heap_size);
+        gc_traced_obj_fields = (int *) malloc(sizeof(int) * heap_size);
     }
 
-    ++lastIndexOfGcTracedObjs;
-    gcTracedObjs[lastIndexOfGcTracedObjs] = ptr;
+    ++last_index_of_gc_traced_objs;
+    gc_traced_objs[last_index_of_gc_traced_objs] = ptr;
+    if (previous_obj_selected_field >= 0) {
+        int last_index_of_gc_traced_obj_fields = last_index_of_gc_traced_objs - 1;
+        gc_traced_obj_fields[last_index_of_gc_traced_obj_fields] = previous_obj_selected_field;
+    }
 
     // assert-dead check
-    if (canProcessAssertDeadStageOne(ptr)) {
-        processAssertDeadStageOne(ptr, lastIndexOfGcTracedObjs);
-    } else if (canProcessAssertDeadStageTwo(ptr)) {
-        processAssertDeadStageTwo(ptr, lastIndexOfGcTracedObjs);
+    if (can_process_assert_dead_stage_one(ptr)) {
+        process_assert_dead_stage_one(ptr, last_index_of_gc_traced_objs);
+    } else if (can_process_assert_dead_stage_two(ptr)) {
+        process_assert_dead_stage_two(ptr, last_index_of_gc_traced_objs);
     }
 
     switch ((*ptr).type) {
         case tc_flonum:
             break;
         case tc_cons:
-            gc_mark(CAR(ptr), lastIndexOfGcTracedObjs);
+        case tc_excons:
+            gc_mark(CAR(ptr), last_index_of_gc_traced_objs, CONS_CAR_TYPE_ID);
             ptr = CDR(ptr);
+            previous_obj_selected_field = CONS_CDR_TYPE_ID;
             goto gc_mark_loop;
         case tc_symbol:
             ptr = VCELL(ptr);
+            previous_obj_selected_field = SYMBOL_VCELL_TYPE_ID;
             goto gc_mark_loop;
         case tc_closure:
-            gc_mark((*ptr).storage_as.closure.code, lastIndexOfGcTracedObjs);
+            gc_mark((*ptr).storage_as.closure.code, last_index_of_gc_traced_objs, CLOSURE_CODE_TYPE_ID);
             ptr = (*ptr).storage_as.closure.env;
+            previous_obj_selected_field = CLOSURE_ENV_TYPE_ID;
             goto gc_mark_loop;
         case tc_subr_0:
         case tc_subr_1:
@@ -1542,7 +1635,7 @@ void mark_protected_registers(void) {
         location = (*reg).location;
         n = (*reg).length;
         for (j = 0; j < n; ++j) {
-            gc_mark(location[j], -1L);
+            gc_mark(location[j], -1L, -1);
         }
     }
 }
@@ -1578,7 +1671,7 @@ void mark_locations_array(LISP *x, long n) {
     for (j = 0; j < n; ++j) {
         p = x[j];
         if (looks_pointerp(p)) {
-            gc_mark(p, -1L);
+            gc_mark(p, -1L, -1);
         }
     }
 }
@@ -1731,9 +1824,9 @@ LISP leval_args(LISP l, LISP env) {
 
 LISP extend_env(LISP actuals, LISP formals, LISP env) {
     if SYMBOLP(formals) {
-        return (env_cons(env_cons(env_cons(formals, NIL), env_cons(actuals, NIL)), env));
+        return (cons(cons(cons(formals, NIL), cons(actuals, NIL)), env));
     }
-    return (env_cons(env_cons(formals, actuals), env));
+    return (cons(cons(formals, actuals), env));
 }
 
 #define ENVLOOKUP_TRICK 1
@@ -1867,10 +1960,10 @@ LISP setvar(LISP var, LISP val, LISP env) {
 LISP leval_setq(LISP args, LISP env) {
     LISP var = car(args);
     LISP val = leval(car(cdr(args)), env);
-    if (recordingAssignSiteOn) {
+    if (recording_assign_site_on) {
         // for recording assign site
         long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
-        tryRecordAssignSite(var, val, assign_site, 1);
+        try_record_assign_site(var, val, assign_site, 1);
     }
     return (setvar(var, val, env));
 }
@@ -1891,7 +1984,7 @@ LISP syntax_define(LISP args) {
 
 // 将最后一个代表line_num的参数排除在外
 LISP process_args_with_ln(LISP args) {
-    return cons(car(args), cons (car(cdr(args)), NIL));
+    return cons(car(args), cons(car(cdr(args)), NIL));
 }
 
 LISP leval_define(LISP args, LISP env) {
@@ -1910,15 +2003,15 @@ LISP leval_define(LISP args, LISP env) {
     long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
 
     if NNULLP(tmp) {
-        if (recordingAssignSiteOn) {
-            tryRecordAssignSite(tmp, val, assign_site, 1);
+        if (recording_assign_site_on) {
+            try_record_assign_site(tmp, val, assign_site, 1);
         }
         return (CAR(tmp) = val);
     }
 
     if NULLP(env) {
-        if (recordingAssignSiteOn) {
-            tryRecordAssignSite(var, val, assign_site, 1);
+        if (recording_assign_site_on) {
+            try_record_assign_site(var, val, assign_site, 1);
         }
         return (VCELL(var) = val);
     }
@@ -1927,9 +2020,9 @@ LISP leval_define(LISP args, LISP env) {
     setcar(tmp, cons(var, car(tmp)));
     setcdr(tmp, cons(val, cdr(tmp)));
 
-    if (recordingAssignSiteOn) {
+    if (recording_assign_site_on) {
         // cdr(tmp) 为最新frame的实参列表
-        tryRecordAssignSite(cdr(tmp), val, assign_site, 1);
+        try_record_assign_site(cdr(tmp), val, assign_site, 1);
     }
     return (val);
 }
@@ -1960,10 +2053,10 @@ LISP leval_lambda(LISP args, LISP env) {
     LISP code = cons(arglchk(car(args)), body);
     LISP result = closure(env, code);
 
-    if (recordingAssignSiteOn) {
+    if (recording_assign_site_on) {
         long assign_site = (long) assign_site_obj->storage_as.flonum.data;
-        tryRecordAssignSite(result, env, assign_site, 1);
-        tryRecordAssignSite(result, code, assign_site, 0);
+        try_record_assign_site(result, env, assign_site, 1);
+        try_record_assign_site(result, code, assign_site, 0);
     }
     return (result);
 }
@@ -2599,7 +2692,7 @@ LISP nreverse(LISP x) {
 }
 
 void init_subrs_1(void) {
-    init_subr_4("cons", external_cons);
+    init_subr_3("cons", external_cons);
     init_subr_1("car", car);
     init_subr_1("cdr", cdr);
     init_subr_3("set-car!", setcar_exteral);
@@ -2668,7 +2761,7 @@ void init_subrs_1(void) {
     init_subr_1("nreverse", nreverse);
     init_subr_0("allocate-heap", allocate_aheap);
     init_subr_1("gc-info", gc_info);
-    init_subr_2("assert-dead", assertDead);
+    init_subr_2("assert-dead", assert_dead);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */

@@ -108,7 +108,7 @@ static void ct_gc_scan(LISP ptr) {
 }
 
 static LISP ct_gc_mark(LISP ptr) {
-    gc_mark(ptr->storage_as.closure.code, -1L);
+    gc_mark(ptr->storage_as.closure.code, -1L, -1);
     return (ptr->storage_as.closure.env);
 }
 
