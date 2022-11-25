@@ -121,17 +121,25 @@ struct obj {
         } c_file;
 
         struct {
-            long dim;
-            struct obj **data;
+            long dim; // data配列の長さ
+            struct obj **data; // fieldデータ
+            struct obj *class_obj;
         } lisp_struct;
 
         struct {
             long dim;
             struct obj **data;
+            struct obj *class_obj;
             long length;
-            long *assign_field_indexes;
-            long *assign_sites;
+            long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
+            long *assign_sites; // 行番号情報
         } lisp_struct_with_rec;
+
+        struct {
+            struct obj *class_name;
+            long dim;
+            struct obj **fields_names;
+        } class_obj;
     } storage_as;
 };
 
@@ -184,6 +192,7 @@ struct obj {
 #define tc_excons_with_both_rec 22
 #define tc_lisp_struct 23
 #define tc_lisp_struct_with_rec 24
+#define tc_class_obj 25
 
 #define tc_user_1 50
 #define tc_user_2 51
@@ -468,8 +477,6 @@ long repl_c_string(char *, long want_sigint, long want_init, long want_print);
 char *siod_version(void);
 
 LISP nreverse(LISP);
-
-LISP define_structure(LISP name, LISP fields);
 
 
 /**

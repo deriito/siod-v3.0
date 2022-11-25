@@ -2691,6 +2691,13 @@ LISP nreverse(LISP x) {
     return (newp);
 }
 
+/**
+ * (define "class_name" ("field1" "field2" "field3"...))
+ */
+LISP define_struct(LISP args) {
+    return (NIL);
+}
+
 void init_subrs_1(void) {
     init_subr_3("cons", external_cons);
     init_subr_1("car", car);
@@ -2762,6 +2769,7 @@ void init_subrs_1(void) {
     init_subr_0("allocate-heap", allocate_aheap);
     init_subr_1("gc-info", gc_info);
     init_subr_2("assert-dead", assert_dead);
+    init_fsubr("define-struct", define_struct);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */
