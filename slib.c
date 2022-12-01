@@ -148,19 +148,23 @@ long stack_size =
         50000;
 #endif
 
+// クラスオブジェクトを格納
+LISP *class_objs = NULL;
+
 // 行号记录功能是否开启的总开关
 short recording_assign_site_on = 1;
 
 // 用于记录标记过的对象
 static LISP *gc_traced_objs = NULL;
 // 与gc_traced_objs的元素一一对应，用于记录具体是哪个field指向了下一个对象
-static int *gc_traced_obj_fields = NULL;
+static long *gc_traced_obj_fields = NULL;
 
 // 参照パスの各要素のデータ構造
 typedef struct {
     short lisp_obj_type;
-    int assign_slot_type;
+    long assign_slot_type;
     short activatep; // 用于标记分段激活的代入对(即，当前带有标记的type->下一个type)
+    LISP class_name_sym_obj;
 } RefPathElement;
 
 // 各个位置的assert-dead的调用信息以及收集的参照パス
@@ -174,29 +178,51 @@ typedef struct {
 // assert-dead的相关信息
 static AssertDeadInfo *assert_dead_info_table = NULL;
 
-typedef struct {
-    int original_type;
-    int replaced_type;
-    UT_hash_handle hh; /* makes this structure hashtable */
-} DynamicTypeReplaceInfo;
+//typedef struct {
+//    int original_type;
+//    int replaced_type;
+//    UT_hash_handle hh; /* makes this structure hashtable */
+//} DynamicTypeReplaceInfo;
+//
+//// 记录需要动态替换类型的信息
+//static DynamicTypeReplaceInfo *dynamic_type_replace_info_table = NULL;
 
-// 记录需要动态替换类型的信息
-static DynamicTypeReplaceInfo *dynamic_type_replace_info_table = NULL;
-
-short both_exconsp(short type1, short type2) {
-    if (tc_excons <= type1 && type1 <= tc_excons_with_both_rec) {
-        if (tc_excons <= type2 && type2 <= tc_excons_with_both_rec) {
-            return 1;
-        }
+LISP get_struct_def_obj(LISP ptr) {
+    if (tc_struct_instance == ptr->type) {
+        return (ptr->storage_as.struct_instance.struct_def_obj);
     }
-    return 0;
+
+    if (tc_struct_instance_with_rec == ptr->type) {
+        return (ptr->storage_as.struct_instance_with_rec.struct_def_obj);
+    }
+
+    return (NIL);
+}
+
+short struct_def_eqp(LISP ptr, RefPathElement *ref_path_ele) {
+    if (ptr->type != tc_struct_instance && ptr->type != tc_struct_instance_with_rec) {
+        return 0;
+    }
+
+    if (ref_path_ele->lisp_obj_type != tc_struct_instance && ref_path_ele->lisp_obj_type != tc_struct_instance_with_rec) {
+        return 0;
+    }
+
+    LISP struct_def = get_struct_def_obj(ptr);
+
+    LISP class_name_sym_obj = struct_def->storage_as.struct_def.class_name_sym;
+    if (0 != strcmp(class_name_sym_obj->storage_as.symbol.pname, ref_path_ele->class_name_sym_obj->storage_as.symbol.pname)) {
+        return 0;
+    }
+
+    return 1;
 }
 
 short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assign_element, RefPathElement *assigned_element) {
-    if (assign_obj->type != assign_element->lisp_obj_type && !both_exconsp(assign_obj->type, assign_element->lisp_obj_type)) {
+    if (assign_obj->type != assign_element->lisp_obj_type && !struct_def_eqp(assign_obj, assign_element)) {
         return 0;
     }
-    if (assigned_obj->type != assigned_element->lisp_obj_type && !both_exconsp(assigned_obj->type, assigned_element->lisp_obj_type)) {
+    if (assigned_obj->type != assigned_element->lisp_obj_type && !struct_def_eqp(assigned_obj, assigned_element)) {
         return 0;
     }
     return 1;
@@ -234,7 +260,7 @@ short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
     return 0;
 }
 
-void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site, short isPre) {
+void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site, long field_index) {
     if (!recording_assign_site_on) {
         return;
     }
@@ -244,7 +270,7 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
     }
 
     // 内部的CONSを無視する
-    while (NULL != assigned_obj && assigned_obj->type == tc_cons) {
+    while (NULL != assigned_obj && assigned_obj->type == tc_cons && !assigned_obj->storage_as.cons.is_external_cons) {
         assigned_obj = CAR(assigned_obj);
     }
 
@@ -252,37 +278,36 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
         return;
     }
 
-    switch (assign_obj->type) {
-        case tc_excons_with_car_rec:
-            if (isPre) {
-                assign_obj->storage_as.excons_with_car_rec.car_assign_site = assign_site;
-            }
-            break;
-        case tc_excons_with_cdr_rec:
-            if (isPre) {
+    if (assign_obj->type == tc_cons) {
+        if (field_index) {
+            assign_obj->storage_as.cons.car_assign_site = assign_site;
+        } else {
+            assign_obj->storage_as.cons.cdr_assign_site = assign_site;
+        }
+    } else if (assign_obj->type == tc_symbol) {
+        assign_obj->storage_as.symbol.vcell_assign_site = assign_site;
+    } else if (assign_obj->type == tc_closure) {
+        if (field_index) {
+            assign_obj->storage_as.closure.env_assign_site = assign_site;
+        } else {
+            assign_obj->storage_as.closure.code_assign_site = assign_site;
+        }
+    } else if (assign_obj->type == tc_struct_instance_with_rec) {
+        LISP sd = assign_obj->storage_as.struct_instance_with_rec.struct_def_obj;
+        long fi = -1L;
+        for (long i = 0; i < sd->storage_as.struct_def.length; ++i) {
+            long tmp_index = sd->storage_as.struct_def.assign_field_indexes[i];
+            if (field_index == tmp_index) {
+                fi = i;
                 break;
             }
-            assign_obj->storage_as.excons_with_cdr_rec.cdr_assign_site = assign_site;
-            break;
-        case tc_excons_with_both_rec:
-            if (isPre) {
-                assign_obj->storage_as.excons_with_both_rec.car_assign_site = assign_site;
-            } else {
-                assign_obj->storage_as.excons_with_both_rec.cdr_assign_site = assign_site;
-            }
-            break;
-        case tc_symbol:
-            assign_obj->storage_as.symbol.vcell_assign_site = assign_site;
-            break;
-        case tc_closure:
-            if (isPre) {
-                assign_obj->storage_as.closure.env_assign_site = assign_site;
-            } else {
-                assign_obj->storage_as.closure.code_assign_site = assign_site;
-            }
-            break;
-        default:
+        }
+        if (fi < 0) {
             return;
+        }
+        assign_obj->storage_as.struct_instance_with_rec.assign_sites[fi] = assign_site;
+    } else {
+        return;
     }
 
     assign_obj->is_assign_info_recorded = 1;
@@ -625,47 +650,14 @@ LISP cons(LISP x, LISP y) {
 }
 
 LISP external_cons(LISP x, LISP y, LISP line_num) {
-    DynamicTypeReplaceInfo *dtri;
-    int excons_type_id = tc_excons;
-    HASH_FIND_INT(dynamic_type_replace_info_table, &excons_type_id, dtri);
-
-    short new_excons_type_id;
-    if (NULL == dtri) {
-        new_excons_type_id = tc_excons;
-    } else {
-        new_excons_type_id = dtri->replaced_type;
-    }
-
-    LISP new_excons;
-    NEWCELL(new_excons, new_excons_type_id);
-
-    switch (new_excons_type_id) {
-        case tc_excons:
-            new_excons->storage_as.excons.car = x;
-            new_excons->storage_as.excons.cdr = y;
-            break;
-        case tc_excons_with_car_rec:
-            new_excons->storage_as.excons_with_car_rec.car = x;
-            new_excons->storage_as.excons_with_car_rec.cdr = y;
-            break;
-        case tc_excons_with_cdr_rec:
-            new_excons->storage_as.excons_with_cdr_rec.car = x;
-            new_excons->storage_as.excons_with_cdr_rec.cdr = y;
-            break;
-        case tc_excons_with_both_rec:
-            new_excons->storage_as.excons_with_both_rec.car = x;
-            new_excons->storage_as.excons_with_both_rec.cdr = y;
-            break;
-        default:
-            return (err("see external_cons", (NIL)));
-    }
-
+    LISP new_cons = cons(x, y);
+    new_cons->storage_as.cons.is_external_cons = 1;
     if (recording_assign_site_on) {
         long ln = (long) line_num->storage_as.flonum.data;
-        try_record_assign_site(new_excons, x, ln, 1);
-        try_record_assign_site(new_excons, y, ln, 0);
+        try_record_assign_site(new_cons, x, ln, 1);
+        try_record_assign_site(new_cons, y, ln, 0);
     }
-    return (new_excons);
+    return (new_cons);
 }
 
 LISP consp(LISP x) { if CONSP(x) return (truth); else return (NIL); }
@@ -676,14 +668,6 @@ LISP car(LISP x) {
             return (NIL);
         case tc_cons:
             return (CAR(x));
-        case tc_excons:
-            return ((*x).storage_as.excons.car);
-        case tc_excons_with_car_rec:
-            return ((*x).storage_as.excons_with_car_rec.car);
-        case tc_excons_with_cdr_rec:
-            return ((*x).storage_as.excons_with_cdr_rec.car);
-        case tc_excons_with_both_rec:
-            return ((*x).storage_as.excons_with_both_rec.car);
         default:
             return (err("wta to car", x));
     }
@@ -695,14 +679,6 @@ LISP cdr(LISP x) {
             return (NIL);
         case tc_cons:
             return (CDR(x));
-        case tc_excons:
-            return ((*x).storage_as.excons.car);
-        case tc_excons_with_car_rec:
-            return ((*x).storage_as.excons_with_car_rec.cdr);
-        case tc_excons_with_cdr_rec:
-            return ((*x).storage_as.excons_with_cdr_rec.cdr);
-        case tc_excons_with_both_rec:
-            return ((*x).storage_as.excons_with_both_rec.cdr);
         default:
             return (err("wta to cdr", x));
     }
@@ -1250,10 +1226,7 @@ void gc_ms_stats_end(void) {
 void translate_type_detail(char *res, LISP ptr) {
     short type = ptr->type;
     switch (type) {
-        case tc_excons:
-        case tc_excons_with_car_rec:
-        case tc_excons_with_cdr_rec:
-        case tc_excons_with_both_rec:
+        case tc_cons:
             strcpy(res, TYPE_STR_CONS);
             return;
         case tc_flonum:
@@ -1280,6 +1253,10 @@ void translate_type_detail(char *res, LISP ptr) {
             strcat(res, ptr->storage_as.c_file.name);
             strcat(res, ")");
             return;
+        case tc_struct_instance:
+        case tc_struct_instance_with_rec:
+            strcpy(res, get_struct_def_obj(ptr)->storage_as.struct_def.class_name_sym->storage_as.symbol.pname);
+            return;
         default:
             strcpy(res, TYPE_STR_NO_SUCH_TYPE);
             char tp[5] = "";
@@ -1288,59 +1265,24 @@ void translate_type_detail(char *res, LISP ptr) {
     }
 }
 
-int query_original_type(short type) {
-    if (tc_excons <= type && type <= tc_excons_with_both_rec) {
-        return tc_excons;
+void try_update_struct_instance_structure(LISP struct_instance, long selected_field) {
+    if (struct_instance->type != tc_struct_instance && struct_instance->type != tc_struct_instance_with_rec) {
+        return;
     }
 
-    if (tc_lisp_struct <= type && type <= tc_lisp_struct_with_rec) {
-        return tc_lisp_struct;
-    }
+    LISP struct_def = get_struct_def_obj(struct_instance);
 
-    return type;
-}
-
-void try_cache_dynamic_type_replace_info(short type, int selected_field) {
-    int original_type = query_original_type(type);
-
-    DynamicTypeReplaceInfo *dynamic_type_replace_info;
-    HASH_FIND_INT(dynamic_type_replace_info_table, &original_type, dynamic_type_replace_info);
-
-    if (NULL == dynamic_type_replace_info) {
-        dynamic_type_replace_info = (DynamicTypeReplaceInfo *) malloc(sizeof(DynamicTypeReplaceInfo));
-        dynamic_type_replace_info->original_type = original_type;
-        dynamic_type_replace_info->replaced_type = 0;
-        HASH_ADD_INT(dynamic_type_replace_info_table, original_type, dynamic_type_replace_info);
-    }
-
-    if (dynamic_type_replace_info->replaced_type == 0) {
-        switch (original_type) {
-            case tc_excons:
-                if (selected_field == CONS_CAR_TYPE_ID) {
-                    dynamic_type_replace_info->replaced_type = tc_excons_with_car_rec;
-                } else if (selected_field == CONS_CDR_TYPE_ID) {
-                    dynamic_type_replace_info->replaced_type = tc_excons_with_cdr_rec;
-                }
-                break;
-                // TODO lisp_struct
-            default:
-                break;
-        }
+    if (struct_def->storage_as.struct_def.length <= 0) {
+        struct_def->storage_as.struct_def.length = 1;
+        struct_def->storage_as.struct_def.assign_field_indexes = (long *) must_malloc(sizeof(long));
+        struct_def->storage_as.struct_def.assign_field_indexes[0] = selected_field;
     } else {
-        switch (dynamic_type_replace_info->replaced_type) {
-            case tc_excons_with_car_rec:
-                if (selected_field == CONS_CDR_TYPE_ID) {
-                    dynamic_type_replace_info->replaced_type = tc_excons_with_both_rec;
-                }
-                break;
-            case tc_excons_with_cdr_rec:
-                if (selected_field == CONS_CAR_TYPE_ID) {
-                    dynamic_type_replace_info->replaced_type = tc_excons_with_both_rec;
-                }
-                break;
-            default:
-                break;
+        long original_length = struct_def->storage_as.struct_def.length;
+        long *tmp = (long *) must_malloc((original_length + 1) * sizeof(long));
+        for (int i = 0; i < original_length; ++i) {
+            tmp[i] = struct_def->storage_as.struct_def.assign_field_indexes[i];
         }
+        tmp[original_length] = selected_field;
     }
 }
 
@@ -1361,7 +1303,9 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
 
     for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
         LISP current_traced_obj = gc_traced_objs[i];
-        if (current_traced_obj->type == tc_cons) {
+
+        // 内部consを無視
+        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
             continue;
         }
 
@@ -1370,6 +1314,9 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
         new_ref_path_element->lisp_obj_type = current_traced_obj->type;
         new_ref_path_element->assign_slot_type = gc_traced_obj_fields[i];
         new_ref_path_element->activatep = 0;
+        if (current_traced_obj->type == tc_struct_instance || current_traced_obj->type == tc_struct_instance_with_rec) {
+            new_ref_path_element->class_name_sym_obj = get_struct_def_obj(current_traced_obj);
+        }
 
         if (NULL == tmp_assert_dead_info->ref_path) {
             UT_icd ref_path_elements_icd = {sizeof(RefPathElement), NULL, NULL, NULL};
@@ -1379,7 +1326,7 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
         utarray_push_back(tmp_assert_dead_info->ref_path, new_ref_path_element);
 
         // 動的型の切り替え情報を記録しておく
-        try_cache_dynamic_type_replace_info(current_traced_obj->type, gc_traced_obj_fields[i]);
+        try_update_struct_instance_structure(current_traced_obj, gc_traced_obj_fields[i]);
     }
 
     ptr->assert_dead = HAD_BEEN_ASSERTED;
@@ -1418,7 +1365,9 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
 
     for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
         LISP current_traced_obj = gc_traced_objs[i];
-        if (current_traced_obj->type == tc_cons) {
+
+        // 内部consを無視
+        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
             continue;
         }
 
@@ -1433,21 +1382,13 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
                 char line_num_str[15] = "";
 
                 switch (current_traced_obj->type) {
-                    case tc_excons_with_car_rec:
-                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_car_rec.car_assign_site);
-                        strcat(path_info, line_num_str);
-                        break;
-                    case tc_excons_with_cdr_rec:
-                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_cdr_rec.cdr_assign_site);
-                        strcat(path_info, line_num_str);
-                        break;
-                    case tc_excons_with_both_rec:
-                        if (current_traced_obj->storage_as.excons_with_both_rec.car == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_both_rec.car_assign_site);
+                    case tc_cons:
+                        if (current_traced_obj->storage_as.cons.car == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.car_assign_site);
                             strcat(path_info, line_num_str);
                         }
-                        if (current_traced_obj->storage_as.excons_with_both_rec.cdr == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.excons_with_both_rec.cdr_assign_site);
+                        if (current_traced_obj->storage_as.cons.cdr == next_traced_obj) {
+                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.cdr_assign_site);
                             strcat(path_info, line_num_str);
                         }
                         break;
@@ -1500,7 +1441,7 @@ short can_process_assert_dead_stage_two(LISP ptr) {
 
         RefPathElement *tmp_last_element = utarray_back(refPath);
         if (ptr->type != tmp_last_element->lisp_obj_type) {
-            if (both_exconsp(tmp_last_element->lisp_obj_type, ptr->type)) {
+            if (struct_def_eqp(ptr, tmp_last_element)) {
                 return 1;
             }
             continue;
@@ -1511,7 +1452,7 @@ short can_process_assert_dead_stage_two(LISP ptr) {
     return 0;
 }
 
-// assert-dead with new features
+// assert-dead with new_struct_instance features
 LISP assert_dead(LISP ptr, LISP ln) {
     if (NULLP(ptr)) {
         return err("Null Pointer!", ptr);
@@ -1521,7 +1462,7 @@ LISP assert_dead(LISP ptr, LISP ln) {
         return (NIL);
     }
 
-    int line_num = (int) ln->storage_as.flonum.data;
+    long line_num = (long) ln->storage_as.flonum.data;
 
     AssertDeadInfo *assert_dead_info;
     HASH_FIND_INT(assert_dead_info_table, &line_num, assert_dead_info);
@@ -1560,7 +1501,7 @@ short can_process_assert_dead_stage_one(LISP ptr) {
     return 1;
 }
 
-void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, int previous_obj_selected_field) {
+void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_selected_field) {
     struct user_type_hooks *p;
 
     gc_mark_loop:
@@ -1576,7 +1517,7 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, int previous_obj_selec
 
     if (NULL == gc_traced_objs || NULL == gc_traced_obj_fields) {
         gc_traced_objs = (LISP *) malloc(sizeof(LISP *) * heap_size);
-        gc_traced_obj_fields = (int *) malloc(sizeof(int) * heap_size);
+        gc_traced_obj_fields = (long *) malloc(sizeof(long) * heap_size);
     }
 
     ++last_index_of_gc_traced_objs;
@@ -1597,7 +1538,6 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, int previous_obj_selec
         case tc_flonum:
             break;
         case tc_cons:
-        case tc_excons:
             gc_mark(CAR(ptr), last_index_of_gc_traced_objs, CONS_CAR_TYPE_ID);
             ptr = CDR(ptr);
             previous_obj_selected_field = CONS_CDR_TYPE_ID;
@@ -1611,6 +1551,16 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, int previous_obj_selec
             ptr = (*ptr).storage_as.closure.env;
             previous_obj_selected_field = CLOSURE_ENV_TYPE_ID;
             goto gc_mark_loop;
+        case tc_struct_instance:
+            for (int i = 0; i < (*ptr).storage_as.struct_instance.dim; ++i) {
+                gc_mark((*ptr).storage_as.struct_instance.data[i], last_index_of_gc_traced_objs, i);
+            }
+            break;
+        case tc_struct_instance_with_rec:
+            for (int i = 0; i < (*ptr).storage_as.struct_instance_with_rec.dim; ++i) {
+                gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
+            }
+            break;
         case tc_subr_0:
         case tc_subr_1:
         case tc_subr_2:
@@ -2278,6 +2228,23 @@ LISP lprin1f(LISP exp, FILE *f) {
             lprin1f(cdr((*exp).storage_as.closure.code), f);
             fput_st(f, ">");
             break;
+        case tc_struct_instance:
+        case tc_struct_instance_with_rec:
+            sprintf(tkbuffer, "#<STRUCT %p>", exp);
+            fput_st(f, tkbuffer);
+            break;
+        case tc_struct_def:
+            fput_st(f, "#<STRUCT-DEF ");
+            lprin1f((*exp).storage_as.struct_def.class_name_sym, f);
+            fput_st(f, " (");
+            for (long i = 0; i < exp->storage_as.struct_def.dim; ++i) {
+                lprin1f((*exp).storage_as.struct_def.field_name_strs[i], f);
+                if (i != exp->storage_as.struct_def.dim - 1) {
+                    fput_st(f, " ");
+                }
+            }
+            fput_st(f, ")>");
+            break;
         default:
             p = get_user_type_hooks(TYPE(exp));
             if (p->prin1)
@@ -2692,10 +2659,167 @@ LISP nreverse(LISP x) {
 }
 
 /**
- * (define "class_name" ("field1" "field2" "field3"...))
+ * (define class_name_sym_str ("field1" "field2" "field3" ...))
  */
-LISP define_struct(LISP args) {
+LISP define_struct(LISP args, LISP env) {
+    LISP class_name = car(args);
+
+    if NSYMBOLP(class_name) {
+        err("wta(non-symbol) to define_struct", class_name);
+    }
+
+    // 计数
+    long num = 0;
+    LISP other_args = car(cdr(args));
+    for (; NULL != other_args; other_args = cdr(other_args)) {
+        ++num;
+    }
+
+    if (num < 0) {
+        err("why num < 0? (see define_struct)", NIL);
+    }
+
+    LISP class_obj = newcell(tc_struct_def);
+    class_obj->storage_as.struct_def.class_name_sym = class_name;
+    class_obj->storage_as.struct_def.dim = num;
+    class_obj->storage_as.struct_def.field_name_strs = (LISP *) must_malloc(sizeof(LISP) * num);
+
+    args = car(cdr(args));
+    for (long i = 0; i < num; i++) {
+        class_obj->storage_as.struct_def.field_name_strs[i] = car(args);
+        args = cdr(args);
+    }
+
+    LISP tmp = envlookup(class_name, env);
+
+    if NNULLP(tmp) {
+        return (CAR(tmp) = class_obj);
+    }
+
+    if NULLP(env) {
+        return (VCELL(class_name) = class_obj);
+    }
+
+    tmp = car(env);
+    setcar(tmp, cons(class_name, car(tmp)));
+    setcdr(tmp, cons(class_name, cdr(tmp)));
+
+    return (class_obj);
+}
+
+// create instance of a struct def
+LISP new_struct_instance(LISP struct_def) {
+    if (struct_def->type != tc_struct_def) {
+        err("wrong struct_def obj!(see new_struct_instance)", struct_def);
+    }
+
+    long length = struct_def->storage_as.struct_def.length;
+    long type = length <= 0 ? tc_struct_instance : tc_struct_instance_with_rec;
+    LISP instance = newcell(type);
+
+    long dim = struct_def->storage_as.struct_def.dim;
+    if (tc_struct_instance == type) {
+        instance->storage_as.struct_instance.dim = dim;
+        instance->storage_as.struct_instance.struct_def_obj = struct_def;
+        instance->storage_as.struct_instance.data = (LISP *) must_malloc(dim * sizeof(LISP));
+    } else {
+        instance->storage_as.struct_instance_with_rec.dim = dim;
+        instance->storage_as.struct_instance_with_rec.struct_def_obj = struct_def;
+        instance->storage_as.struct_instance_with_rec.data = (LISP *) must_malloc(dim * sizeof(LISP));
+        instance->storage_as.struct_instance_with_rec.length = length;
+        instance->storage_as.struct_instance_with_rec.assign_sites = (long *) must_malloc(length * sizeof(long));
+    }
+
+    return (instance);
+}
+
+// (set-field struct-instance "field1" val1 line_num)
+LISP set_field(LISP struct_instance, LISP field_name, LISP val, LISP line_num) {
+    if (NULL == struct_instance) {
+        err("why struct_instance is null? (see set_field)", struct_instance);
+    }
+
+    if (!(tc_struct_instance <= struct_instance->type && struct_instance->type <= tc_struct_instance_with_rec)) {
+        err("wrong struct_instance obj! (see set_field)", struct_instance);
+    }
+
+    LISP struct_def;
+    if (tc_struct_instance == struct_instance->type) {
+        struct_def = struct_instance->storage_as.struct_instance.struct_def_obj;
+    } else {
+        struct_def = struct_instance->storage_as.struct_instance_with_rec.struct_def_obj;
+    }
+
+    if (NULL == struct_def) {
+        err("why struct_def is null! (see set_field)", struct_def);
+    }
+
+    long field_index = -1L;
+    for (long i = 0; i < struct_def->storage_as.struct_def.dim; ++i) {
+        LISP tmp_str = struct_def->storage_as.struct_def.field_name_strs[i];
+        if (0 == strcmp(tmp_str->storage_as.string.data, field_name->storage_as.string.data)) {
+            field_index = i;
+            break;
+        }
+    }
+
+    if (field_index < 0) {
+        err("wrong field name! (see set_field)", field_name);
+    }
+
+    if (tc_struct_instance == struct_instance->type) {
+        struct_instance->storage_as.struct_instance.data[field_index] = val;
+    } else {
+        struct_instance->storage_as.struct_instance_with_rec.data[field_index] = val;
+    }
+
+    if (recording_assign_site_on) {
+        long ln = (long) line_num->storage_as.flonum.data;
+        try_record_assign_site(struct_instance, val, ln, field_index);
+    }
+
     return (NIL);
+}
+
+// (get-field struct-instance "field1")
+LISP get_field(LISP struct_instance, LISP field_name) {
+    if (NULL == struct_instance) {
+        err("why struct_instance is null? (see get_field)", struct_instance);
+    }
+
+    if (!(tc_struct_instance <= struct_instance->type && struct_instance->type <= tc_struct_instance_with_rec)) {
+        err("wrong struct_instance obj! (see get_field)", struct_instance);
+    }
+
+    LISP struct_def;
+    if (tc_struct_instance == struct_instance->type) {
+        struct_def = struct_instance->storage_as.struct_instance.struct_def_obj;
+    } else {
+        struct_def = struct_instance->storage_as.struct_instance_with_rec.struct_def_obj;
+    }
+
+    if (NULL == struct_def) {
+        err("why struct_def is null! (see get_field)", struct_def);
+    }
+
+    long field_index = -1L;
+    for (long i = 0; i < struct_def->storage_as.struct_def.dim; ++i) {
+        LISP tmp_str = struct_def->storage_as.struct_def.field_name_strs[i];
+        if (0 == strcmp(tmp_str->storage_as.string.data, field_name->storage_as.string.data)) {
+            field_index = i;
+            break;
+        }
+    }
+
+    if (field_index < 0) {
+        err("wrong field name! (see get_field)", field_name);
+    }
+
+    if (tc_struct_instance == struct_instance->type) {
+        return (struct_instance->storage_as.struct_instance.data[field_index]);
+    } else {
+        return (struct_instance->storage_as.struct_instance_with_rec.data[field_index]);
+    }
 }
 
 void init_subrs_1(void) {
@@ -2770,6 +2894,9 @@ void init_subrs_1(void) {
     init_subr_1("gc-info", gc_info);
     init_subr_2("assert-dead", assert_dead);
     init_fsubr("define-struct", define_struct);
+    init_subr_1("new-struct-instance", new_struct_instance);
+    init_subr_4("set-field", set_field);
+    init_subr_2("get-field", get_field);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */

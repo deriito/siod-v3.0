@@ -16,32 +16,11 @@ struct obj {
     union {
         struct {
             struct obj *car;
+            long car_assign_site;
             struct obj *cdr;
+            long cdr_assign_site;
+            short is_external_cons;
         } cons; // 内部cons
-
-        struct {
-            struct obj *car;
-            struct obj *cdr;
-        } excons; // 外部cons
-
-        struct {
-            struct obj *car;
-            int car_assign_site;
-            struct obj *cdr;
-        } excons_with_car_rec;
-
-        struct {
-            struct obj *car;
-            struct obj *cdr;
-            int cdr_assign_site;
-        } excons_with_cdr_rec;
-
-        struct {
-            struct obj *car;
-            int car_assign_site;
-            struct obj *cdr;
-            int cdr_assign_site;
-        } excons_with_both_rec;
 
         struct {
             double data;
@@ -50,7 +29,7 @@ struct obj {
         struct {
             char *pname;
             struct obj *vcell;
-            int vcell_assign_site;
+            long vcell_assign_site;
         } symbol;
 
         struct {
@@ -123,23 +102,24 @@ struct obj {
         struct {
             long dim; // data配列の長さ
             struct obj **data; // fieldデータ
-            struct obj *class_obj;
-        } lisp_struct;
+            struct obj *struct_def_obj;
+        } struct_instance;
 
         struct {
             long dim;
             struct obj **data;
-            struct obj *class_obj;
+            struct obj *struct_def_obj;
             long length;
-            long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
             long *assign_sites; // 行番号情報
-        } lisp_struct_with_rec;
+        } struct_instance_with_rec;
 
         struct {
-            struct obj *class_name;
+            struct obj *class_name_sym;
             long dim;
-            struct obj **fields_names;
-        } class_obj;
+            struct obj **field_name_strs;
+            long length;
+            long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
+        } struct_def;
     } storage_as;
 };
 
@@ -186,13 +166,9 @@ struct obj {
 #define tc_lisp_array   16
 #define tc_c_file       17
 #define tc_subr_4 18
-#define tc_excons 19
-#define tc_excons_with_car_rec 20
-#define tc_excons_with_cdr_rec 21
-#define tc_excons_with_both_rec 22
-#define tc_lisp_struct 23
-#define tc_lisp_struct_with_rec 24
-#define tc_class_obj 25
+#define tc_struct_instance 19
+#define tc_struct_instance_with_rec 20
+#define tc_struct_def 21
 
 #define tc_user_1 50
 #define tc_user_2 51
@@ -480,7 +456,7 @@ LISP nreverse(LISP);
 
 
 /**
- * macros for gc assertion with new features
+ * macros for gc assertion with new_struct_instance features
  */
 
 // stages of "assert-dead" assertion
