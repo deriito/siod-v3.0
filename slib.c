@@ -169,7 +169,7 @@ typedef struct {
 
 // 各个位置的assert-dead的调用信息以及收集的参照パス
 typedef struct {
-    int line_num;
+    long line_num;
     short stage;
     UT_array *ref_path;
     UT_hash_handle hh; /* makes this structure hashtable */
@@ -228,6 +228,7 @@ short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assi
     return 1;
 }
 
+// TODO
 short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
     AssertDeadInfo *tmp_assert_dead_info;
     for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
@@ -236,19 +237,19 @@ short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
             continue;
         }
 
-        int ref_path_length = utarray_len(ref_path);
+        long ref_path_length = utarray_len(ref_path);
         if (ref_path_length <= LONG_REF_PATH_THRESHOLD) {
-            for (int i = 0; i < ref_path_length - 1; ++i) {
+            for (long i = 0; i < ref_path_length - 1L; ++i) {
                 RefPathElement *assign_element = utarray_eltptr(ref_path, i);
-                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1);
+                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
                 if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
                     return 1;
                 }
             }
         } else { // TODO 分段的代入记录的完善
-            for (int i = 0; i < ref_path_length - 1; ++i) {
+            for (int i = 0; i < ref_path_length - 1L; ++i) {
                 RefPathElement *assign_element = utarray_eltptr(ref_path, i);
-                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1);
+                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
                 if (assign_element->activatep) {
                     if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
                         return 1;
@@ -278,21 +279,21 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
         return;
     }
 
-    if (assign_obj->type == tc_cons) {
+    if (tc_cons == assign_obj->type) {
         if (field_index) {
             assign_obj->storage_as.cons.car_assign_site = assign_site;
         } else {
             assign_obj->storage_as.cons.cdr_assign_site = assign_site;
         }
-    } else if (assign_obj->type == tc_symbol) {
+    } else if (tc_symbol == assign_obj->type) {
         assign_obj->storage_as.symbol.vcell_assign_site = assign_site;
-    } else if (assign_obj->type == tc_closure) {
+    } else if (tc_closure == assign_obj->type) {
         if (field_index) {
             assign_obj->storage_as.closure.env_assign_site = assign_site;
         } else {
             assign_obj->storage_as.closure.code_assign_site = assign_site;
         }
-    } else if (assign_obj->type == tc_struct_instance_with_rec) {
+    } else if (tc_struct_instance_with_rec == assign_obj->type) {
         LISP sd = assign_obj->storage_as.struct_instance_with_rec.struct_def_obj;
         long fi = -1L;
         for (long i = 0; i < sd->storage_as.struct_def.length; ++i) {
@@ -1279,7 +1280,7 @@ void try_update_struct_instance_structure(LISP struct_instance, long selected_fi
     } else {
         long original_length = struct_def->storage_as.struct_def.length;
         long *tmp = (long *) must_malloc((original_length + 1) * sizeof(long));
-        for (int i = 0; i < original_length; ++i) {
+        for (long i = 0; i < original_length; ++i) {
             tmp[i] = struct_def->storage_as.struct_def.assign_field_indexes[i];
         }
         tmp[original_length] = selected_field;
@@ -1294,14 +1295,14 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
     }
 
     AssertDeadInfo *tmp_assert_dead_info;
-    HASH_FIND_INT(assert_dead_info_table, &(ptr->asserted_dead_at), tmp_assert_dead_info);
+    HASH_FIND(hh, assert_dead_info_table, &(ptr->asserted_dead_at), sizeof(long), tmp_assert_dead_info);
     if (NULL == tmp_assert_dead_info) {
         printf("\033[31mRuntime Exception: Why the tmpAssertDeadInfo is NULL? (see \"process_assert_dead_stage_one()\")\n\033[0m");
         exit(-1);
         return;
     }
 
-    for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
+    for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
         LISP current_traced_obj = gc_traced_objs[i];
 
         // 内部consを無視
@@ -1381,38 +1382,46 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
             if (recording_assign_site_on && current_traced_obj->is_assign_info_recorded) {
                 char line_num_str[15] = "";
 
-                switch (current_traced_obj->type) {
-                    case tc_cons:
-                        if (current_traced_obj->storage_as.cons.car == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.car_assign_site);
-                            strcat(path_info, line_num_str);
-                        }
-                        if (current_traced_obj->storage_as.cons.cdr == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.cdr_assign_site);
-                            strcat(path_info, line_num_str);
-                        }
-                        break;
-                    case tc_symbol:
-                        if (current_traced_obj->storage_as.symbol.vcell == next_traced_obj) {
+                if (tc_cons == current_traced_obj->type) {
+                    if (current_traced_obj->storage_as.cons.car == next_traced_obj) {
+                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.car_assign_site);
+                        strcat(path_info, line_num_str);
+                    }
+                    if (current_traced_obj->storage_as.cons.cdr == next_traced_obj) {
+                        translate_to_line_num_str(line_num_str, current_traced_obj->storage_as.cons.cdr_assign_site);
+                        strcat(path_info, line_num_str);
+                    }
+                } else if (tc_symbol == current_traced_obj->type) {
+                    if (current_traced_obj->storage_as.symbol.vcell == next_traced_obj) {
+                        translate_to_line_num_str(line_num_str,
+                                                  current_traced_obj->storage_as.symbol.vcell_assign_site);
+                        strcat(path_info, line_num_str);
+                    }
+                } else if (tc_closure == current_traced_obj->type) {
+                    if (current_traced_obj->storage_as.closure.env == next_traced_obj) {
+                        translate_to_line_num_str(line_num_str,
+                                                  current_traced_obj->storage_as.closure.env_assign_site);
+                        strcat(path_info, line_num_str);
+                    }
+                    if (current_traced_obj->storage_as.closure.code == next_traced_obj) {
+                        translate_to_line_num_str(line_num_str,
+                                                  current_traced_obj->storage_as.closure.code_assign_site);
+                        strcat(path_info, line_num_str);
+                    }
+                } else if (tc_struct_instance_with_rec == current_traced_obj->type) {
+                    LISP struct_def_obj = current_traced_obj->storage_as.struct_instance_with_rec.struct_def_obj;
+                    long *assign_field_indexes = struct_def_obj->storage_as.struct_def.assign_field_indexes;
+                    long length = struct_def_obj->storage_as.struct_def.length;
+                    for (long i = 0; i < length; ++i) {
+                        if (current_traced_obj->storage_as.struct_instance_with_rec.data[assign_field_indexes[i]] == next_traced_obj) {
                             translate_to_line_num_str(line_num_str,
-                                                      current_traced_obj->storage_as.symbol.vcell_assign_site);
+                                                      current_traced_obj->storage_as.struct_instance_with_rec.assign_sites[i]);
                             strcat(path_info, line_num_str);
                         }
-                        break;
-                    case tc_closure:
-                        if (current_traced_obj->storage_as.closure.env == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str,
-                                                      current_traced_obj->storage_as.closure.env_assign_site);
-                            strcat(path_info, line_num_str);
-                        }
-                        if (current_traced_obj->storage_as.closure.code == next_traced_obj) {
-                            translate_to_line_num_str(line_num_str,
-                                                      current_traced_obj->storage_as.closure.code_assign_site);
-                            strcat(path_info, line_num_str);
-                        }
-                        break;
+                    }
                 }
             }
+
             strcat(path_info, "->\n");
         }
     }
@@ -1465,7 +1474,7 @@ LISP assert_dead(LISP ptr, LISP ln) {
     long line_num = (long) ln->storage_as.flonum.data;
 
     AssertDeadInfo *assert_dead_info;
-    HASH_FIND_INT(assert_dead_info_table, &line_num, assert_dead_info);
+    HASH_FIND(hh, assert_dead_info_table, &line_num, sizeof(long), assert_dead_info);
     if (NULL != assert_dead_info) {
         return (NIL);
     }
@@ -1475,7 +1484,7 @@ LISP assert_dead(LISP ptr, LISP ln) {
     new_assert_dead_info->stage = ASSERT_DEAD_STAGE_ROUGH;
     new_assert_dead_info->ref_path = NULL;
 
-    HASH_ADD_INT(assert_dead_info_table, line_num, new_assert_dead_info);
+    HASH_ADD(hh, assert_dead_info_table, line_num, sizeof(long), new_assert_dead_info);
 
     ptr->assert_dead = HAS_BEEN_ASSERTED;
     ptr->asserted_dead_at = line_num;
@@ -1487,9 +1496,9 @@ short can_process_assert_dead_stage_one(LISP ptr) {
         return 0;
     }
 
-    int line_num = ptr->asserted_dead_at;
+    long line_num = ptr->asserted_dead_at;
     AssertDeadInfo *tmp_assert_dead_info;
-    HASH_FIND_INT(assert_dead_info_table, &line_num, tmp_assert_dead_info);
+    HASH_FIND(hh, assert_dead_info_table, &line_num, sizeof(long), tmp_assert_dead_info);
     if (NULL == tmp_assert_dead_info) {
         return 0;
     }
@@ -1523,7 +1532,7 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
     ++last_index_of_gc_traced_objs;
     gc_traced_objs[last_index_of_gc_traced_objs] = ptr;
     if (previous_obj_selected_field >= 0) {
-        int last_index_of_gc_traced_obj_fields = last_index_of_gc_traced_objs - 1;
+        long last_index_of_gc_traced_obj_fields = last_index_of_gc_traced_objs - 1L;
         gc_traced_obj_fields[last_index_of_gc_traced_obj_fields] = previous_obj_selected_field;
     }
 
@@ -1552,12 +1561,12 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
             previous_obj_selected_field = CLOSURE_ENV_TYPE_ID;
             goto gc_mark_loop;
         case tc_struct_instance:
-            for (int i = 0; i < (*ptr).storage_as.struct_instance.dim; ++i) {
+            for (long i = 0; i < (*ptr).storage_as.struct_instance.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance.data[i], last_index_of_gc_traced_objs, i);
             }
             break;
         case tc_struct_instance_with_rec:
-            for (int i = 0; i < (*ptr).storage_as.struct_instance_with_rec.dim; ++i) {
+            for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
             }
             break;

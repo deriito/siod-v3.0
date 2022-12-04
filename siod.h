@@ -11,7 +11,7 @@ struct obj {
     short type;
     short assert_dead; // assert-dead mark
     short is_assign_info_recorded;
-    int asserted_dead_at; // 记录被assert-dead所mark的, 在source code中的位置
+    long asserted_dead_at; // 记录被assert-dead所mark的, 在source code中的位置
 
     union {
         struct {
