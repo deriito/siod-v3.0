@@ -210,8 +210,9 @@ short struct_def_eqp(LISP ptr, RefPathElement *ref_path_ele) {
 
     LISP struct_def = get_struct_def_obj(ptr);
 
-    LISP class_name_sym_obj = struct_def->storage_as.struct_def.class_name_sym;
-    if (0 != strcmp(class_name_sym_obj->storage_as.symbol.pname, ref_path_ele->class_name_sym_obj->storage_as.symbol.pname)) {
+    LISP ptr_class_name_sym_obj = struct_def->storage_as.struct_def.class_name_sym;
+    LISP ref_path_ele_class_name_sym_obj = ref_path_ele->class_name_sym_obj->storage_as.struct_def.class_name_sym;
+    if (0 != strcmp(ptr_class_name_sym_obj->storage_as.symbol.pname, ref_path_ele_class_name_sym_obj->storage_as.symbol.pname)) {
         return 0;
     }
 
@@ -1313,6 +1314,9 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
         // 参照パスを記録しておく
         RefPathElement *new_ref_path_element = (RefPathElement *) malloc(sizeof(RefPathElement));
         new_ref_path_element->lisp_obj_type = current_traced_obj->type;
+        if (tc_struct_instance == current_traced_obj->type) {
+            new_ref_path_element->lisp_obj_type = tc_struct_instance_with_rec;
+        }
         new_ref_path_element->assign_slot_type = gc_traced_obj_fields[i];
         new_ref_path_element->activatep = 0;
         if (current_traced_obj->type == tc_struct_instance || current_traced_obj->type == tc_struct_instance_with_rec) {
@@ -1450,14 +1454,16 @@ short can_process_assert_dead_stage_two(LISP ptr) {
 
         RefPathElement *tmp_last_element = utarray_back(refPath);
         if (ptr->type != tmp_last_element->lisp_obj_type) {
-            if (struct_def_eqp(ptr, tmp_last_element)) {
-                return 1;
-            }
+            continue;
+        }
+
+        if (tc_struct_instance_with_rec == ptr->type && !struct_def_eqp(ptr, tmp_last_element)) {
             continue;
         }
 
         return 1;
     }
+
     return 0;
 }
 
@@ -1568,6 +1574,11 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
         case tc_struct_instance_with_rec:
             for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
+            }
+            break;
+        case tc_struct_def:
+            for (long i = 0; i < (*ptr).storage_as.struct_def.dim; ++i) {
+                gc_mark((*ptr).storage_as.struct_def.field_name_strs[i], last_index_of_gc_traced_objs, i);
             }
             break;
         case tc_subr_0:
@@ -2692,28 +2703,29 @@ LISP define_struct(LISP args, LISP env) {
     class_obj->storage_as.struct_def.class_name_sym = class_name;
     class_obj->storage_as.struct_def.dim = num;
     class_obj->storage_as.struct_def.field_name_strs = (LISP *) must_malloc(sizeof(LISP) * num);
-
     args = car(cdr(args));
     for (long i = 0; i < num; i++) {
         class_obj->storage_as.struct_def.field_name_strs[i] = car(args);
         args = cdr(args);
     }
+    class_obj->storage_as.struct_def.length = 0;
+    class_obj->storage_as.struct_def.assign_field_indexes = NULL;
 
-    LISP tmp = envlookup(class_name, env);
+//    LISP tmp = envlookup(class_name, env);
+//
+//    if NNULLP(tmp) {
+//        return (CAR(tmp) = class_obj);
+//    }
 
-    if NNULLP(tmp) {
-        return (CAR(tmp) = class_obj);
-    }
-
-    if NULLP(env) {
+//    if NULLP(env) {
         return (VCELL(class_name) = class_obj);
-    }
+//    }
 
-    tmp = car(env);
-    setcar(tmp, cons(class_name, car(tmp)));
-    setcdr(tmp, cons(class_name, cdr(tmp)));
-
-    return (class_obj);
+//    tmp = car(env);
+//    setcar(tmp, cons(class_name, car(tmp)));
+//    setcdr(tmp, cons(class_name, cdr(tmp)));
+//
+//    return (class_obj);
 }
 
 // create instance of a struct def
@@ -2731,12 +2743,19 @@ LISP new_struct_instance(LISP struct_def) {
         instance->storage_as.struct_instance.dim = dim;
         instance->storage_as.struct_instance.struct_def_obj = struct_def;
         instance->storage_as.struct_instance.data = (LISP *) must_malloc(dim * sizeof(LISP));
+        for (long i = 0; i < dim; ++i) {
+            instance->storage_as.struct_instance.data[i] = NIL;
+        }
     } else {
         instance->storage_as.struct_instance_with_rec.dim = dim;
         instance->storage_as.struct_instance_with_rec.struct_def_obj = struct_def;
         instance->storage_as.struct_instance_with_rec.data = (LISP *) must_malloc(dim * sizeof(LISP));
+        for (long i = 0; i < dim; ++i) {
+            instance->storage_as.struct_instance_with_rec.data[i] = NIL;
+        }
         instance->storage_as.struct_instance_with_rec.length = length;
         instance->storage_as.struct_instance_with_rec.assign_sites = (long *) must_malloc(length * sizeof(long));
+        memset(instance->storage_as.struct_instance_with_rec.assign_sites, 0, length);
     }
 
     return (instance);
@@ -2752,13 +2771,7 @@ LISP set_field(LISP struct_instance, LISP field_name, LISP val, LISP line_num) {
         err("wrong struct_instance obj! (see set_field)", struct_instance);
     }
 
-    LISP struct_def;
-    if (tc_struct_instance == struct_instance->type) {
-        struct_def = struct_instance->storage_as.struct_instance.struct_def_obj;
-    } else {
-        struct_def = struct_instance->storage_as.struct_instance_with_rec.struct_def_obj;
-    }
-
+    LISP struct_def = get_struct_def_obj(struct_instance);
     if (NULL == struct_def) {
         err("why struct_def is null! (see set_field)", struct_def);
     }
@@ -2800,13 +2813,7 @@ LISP get_field(LISP struct_instance, LISP field_name) {
         err("wrong struct_instance obj! (see get_field)", struct_instance);
     }
 
-    LISP struct_def;
-    if (tc_struct_instance == struct_instance->type) {
-        struct_def = struct_instance->storage_as.struct_instance.struct_def_obj;
-    } else {
-        struct_def = struct_instance->storage_as.struct_instance_with_rec.struct_def_obj;
-    }
-
+    LISP struct_def = get_struct_def_obj(struct_instance);
     if (NULL == struct_def) {
         err("why struct_def is null! (see get_field)", struct_def);
     }
