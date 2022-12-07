@@ -178,15 +178,6 @@ typedef struct {
 // assert-dead的相关信息
 static AssertDeadInfo *assert_dead_info_table = NULL;
 
-//typedef struct {
-//    int original_type;
-//    int replaced_type;
-//    UT_hash_handle hh; /* makes this structure hashtable */
-//} DynamicTypeReplaceInfo;
-//
-//// 记录需要动态替换类型的信息
-//static DynamicTypeReplaceInfo *dynamic_type_replace_info_table = NULL;
-
 LISP get_struct_def_obj(LISP ptr) {
     if (tc_struct_instance == ptr->type) {
         return (ptr->storage_as.struct_instance.struct_def_obj);
@@ -229,7 +220,6 @@ short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assi
     return 1;
 }
 
-// TODO
 short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
     AssertDeadInfo *tmp_assert_dead_info;
     for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
@@ -247,7 +237,7 @@ short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
                     return 1;
                 }
             }
-        } else { // TODO 分段的代入记录的完善
+        } else {
             for (int i = 0; i < ref_path_length - 1L; ++i) {
                 RefPathElement *assign_element = utarray_eltptr(ref_path, i);
                 RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
@@ -943,7 +933,7 @@ void init_storage_1(void) {
     gc_protect_sym(&truth, "t");
     setvar(truth, truth, NIL);
     setvar(cintern("nil"), NIL, NIL);
-    // TODO 是这里将let与let-internal-macro相关联
+    // 是这里将let与let-internal-macro相关联
     setvar(cintern("let"), cintern("let-internal-macro"), NIL);
     gc_protect_sym(&sym_errobj, "errobj");
     setvar(sym_errobj, NIL, NIL);
@@ -1326,6 +1316,8 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
         if (NULL == tmp_assert_dead_info->ref_path) {
             UT_icd ref_path_elements_icd = {sizeof(RefPathElement), NULL, NULL, NULL};
             utarray_new(tmp_assert_dead_info->ref_path, &ref_path_elements_icd);
+            // 参照パスの先頭要素の「段階的記録マーク」をオンにしておく
+            new_ref_path_element->activatep = 1;
         }
 
         utarray_push_back(tmp_assert_dead_info->ref_path, new_ref_path_element);
@@ -1368,7 +1360,7 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
     char path_info[(path_info_length + 1) * (40 + 10 + 10)];
     memset(path_info, 0, sizeof(path_info));
 
-    for (long i = 0; i <= last_index_of_gc_traced_objs; i++) {
+    for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
         LISP current_traced_obj = gc_traced_objs[i];
 
         // 内部consを無視
@@ -1376,9 +1368,9 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
             continue;
         }
 
-        char tmpTypeStr[40] = "";
-        translate_type_detail(tmpTypeStr, current_traced_obj);
-        strcat(path_info, tmpTypeStr);
+        char tmp_type_str[40] = "";
+        translate_type_detail(tmp_type_str, current_traced_obj);
+        strcat(path_info, tmp_type_str);
         strcat(path_info, "; ");
 
         if (i != last_index_of_gc_traced_objs) {
@@ -1416,10 +1408,10 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
                     LISP struct_def_obj = current_traced_obj->storage_as.struct_instance_with_rec.struct_def_obj;
                     long *assign_field_indexes = struct_def_obj->storage_as.struct_def.assign_field_indexes;
                     long length = struct_def_obj->storage_as.struct_def.length;
-                    for (long i = 0; i < length; ++i) {
-                        if (current_traced_obj->storage_as.struct_instance_with_rec.data[assign_field_indexes[i]] == next_traced_obj) {
+                    for (long j = 0; j < length; ++j) {
+                        if (current_traced_obj->storage_as.struct_instance_with_rec.data[assign_field_indexes[j]] == next_traced_obj) {
                             translate_to_line_num_str(line_num_str,
-                                                      current_traced_obj->storage_as.struct_instance_with_rec.assign_sites[i]);
+                                                      current_traced_obj->storage_as.struct_instance_with_rec.assign_sites[j]);
                             strcat(path_info, line_num_str);
                         }
                     }
@@ -2292,7 +2284,7 @@ int f_getc(FILE *f) {
     dflag = interrupt_differed;
     c = getc(f);
 #ifdef VMS
-                                                                                                                            if ((dflag == 0) & interrupt_differed & (f == stdin))
+   if ((dflag == 0) & interrupt_differed & (f == stdin))
    while((c != 0) & (c != EOF)) c = getc(f);
 #endif
     no_interrupt(iflag);

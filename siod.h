@@ -475,7 +475,7 @@ LISP nreverse(LISP);
 #define TYPE_STR_FILE "FILE"
 #define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
 
-#define LONG_REF_PATH_THRESHOLD (10) // threshold of length of a long focusing reference path
+#define LONG_REF_PATH_THRESHOLD (2) // threshold of length of a long focusing reference path
 
 // data structure field type ids
 #define CONS_CAR_TYPE_ID 0
