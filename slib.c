@@ -164,6 +164,7 @@ typedef struct {
     short lisp_obj_type;
     long assign_slot_type;
     short activatep; // 用于标记分段激活的代入对(即，当前带有标记的type->下一个type)
+    short checked; // 该类型的obj被记录过行号信息
     LISP class_name_sym_obj;
 } RefPathElement;
 
@@ -202,7 +203,7 @@ short struct_def_eqp(LISP ptr, RefPathElement *ref_path_ele) {
     LISP struct_def = get_struct_def_obj(ptr);
 
     LISP ptr_class_name_sym_obj = struct_def->storage_as.struct_def.class_name_sym;
-    LISP ref_path_ele_class_name_sym_obj = ref_path_ele->class_name_sym_obj->storage_as.struct_def.class_name_sym;
+    LISP ref_path_ele_class_name_sym_obj = ref_path_ele->class_name_sym_obj;
     if (0 != strcmp(ptr_class_name_sym_obj->storage_as.symbol.pname, ref_path_ele_class_name_sym_obj->storage_as.symbol.pname)) {
         return 0;
     }
@@ -220,7 +221,7 @@ short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assi
     return 1;
 }
 
-short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
+RefPathElement *focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
     AssertDeadInfo *tmp_assert_dead_info;
     for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
         UT_array *ref_path = tmp_assert_dead_info->ref_path;
@@ -234,22 +235,24 @@ short focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
                 RefPathElement *assign_element = utarray_eltptr(ref_path, i);
                 RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
                 if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
-                    return 1;
+                    return assign_element;
                 }
             }
         } else {
             for (int i = 0; i < ref_path_length - 1L; ++i) {
                 RefPathElement *assign_element = utarray_eltptr(ref_path, i);
-                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
-                if (assign_element->activatep) {
-                    if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
-                        return 1;
-                    }
+                if (!assign_element->activatep) {
+                    continue;
                 }
+                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
+                if (!judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
+                    break;
+                }
+                return assign_element;
             }
         }
     }
-    return 0;
+    return NULL;
 }
 
 void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site, long field_index) {
@@ -266,7 +269,8 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
         assigned_obj = CAR(assigned_obj);
     }
 
-    if (!focusing_ref_patternp(assign_obj, assigned_obj)) {
+    RefPathElement *assign_element = focusing_ref_patternp(assign_obj, assigned_obj);
+    if (NULL == assign_element) {
         return;
     }
 
@@ -303,6 +307,7 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
     }
 
     assign_obj->is_assign_info_recorded = 1;
+    assign_element->checked = 1;
 }
 
 void process_cla(int argc, char **argv, int warnflag) {
@@ -1296,21 +1301,30 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
     for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
         LISP current_traced_obj = gc_traced_objs[i];
 
-        // 内部consを無視
-        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
-            continue;
-        }
+//        // 内部consを無視
+//        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
+//            continue;
+//        }
 
         // 参照パスを記録しておく
         RefPathElement *new_ref_path_element = (RefPathElement *) malloc(sizeof(RefPathElement));
-        new_ref_path_element->lisp_obj_type = current_traced_obj->type;
-        if (tc_struct_instance == current_traced_obj->type) {
+
+        if (tc_struct_instance == current_traced_obj->type && i != last_index_of_gc_traced_objs) {
             new_ref_path_element->lisp_obj_type = tc_struct_instance_with_rec;
+        } else {
+            new_ref_path_element->lisp_obj_type = current_traced_obj->type;
         }
+
         new_ref_path_element->assign_slot_type = gc_traced_obj_fields[i];
         new_ref_path_element->activatep = 0;
+        new_ref_path_element->checked = 0;
+
         if (current_traced_obj->type == tc_struct_instance || current_traced_obj->type == tc_struct_instance_with_rec) {
-            new_ref_path_element->class_name_sym_obj = get_struct_def_obj(current_traced_obj);
+            if (tc_struct_instance == ptr->type) {
+                new_ref_path_element->class_name_sym_obj = current_traced_obj->storage_as.struct_instance.struct_def_obj->storage_as.struct_def.class_name_sym;
+            } else {
+                new_ref_path_element->class_name_sym_obj = current_traced_obj->storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.class_name_sym;
+            }
         }
 
         if (NULL == tmp_assert_dead_info->ref_path) {
@@ -1322,8 +1336,10 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
 
         utarray_push_back(tmp_assert_dead_info->ref_path, new_ref_path_element);
 
-        // 動的型の切り替え情報を記録しておく
-        try_update_struct_instance_structure(current_traced_obj, gc_traced_obj_fields[i]);
+        if (i != last_index_of_gc_traced_objs) {
+            // 動的型の切り替え情報を記録しておく
+            try_update_struct_instance_structure(current_traced_obj, gc_traced_obj_fields[i]);
+        }
     }
 
     ptr->assert_dead = HAD_BEEN_ASSERTED;
@@ -1337,6 +1353,41 @@ void translate_to_line_num_str(char* dst, long line_num) {
         return;
     }
     sprintf(dst, "@ln%ld", line_num);
+}
+
+void try_update_active_mark(LISP ref_path_last2_obj, LISP ref_path_last_obj) {
+    AssertDeadInfo *tmp_assert_dead_info;
+    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
+        UT_array *ref_path = tmp_assert_dead_info->ref_path;
+        if (NULL == ref_path) {
+            continue;
+        }
+
+        long ref_path_length = utarray_len(ref_path);
+        if (ref_path_length < 2) {
+            continue;
+        }
+
+        RefPathElement *last2 = utarray_eltptr(ref_path, ref_path_length - 2L);
+        RefPathElement *last = utarray_eltptr(ref_path, ref_path_length - 1L);
+        if (!judge_ref_pattern(ref_path_last2_obj, ref_path_last_obj, last2, last)) {
+            continue;
+        }
+
+        for (long i = 0; i < ref_path_length - 1L; ++i) {
+            RefPathElement *t1 = utarray_eltptr(ref_path, i);
+            if (!t1->activatep) {
+                continue;
+            }
+            if (!t1->checked) {
+                return;
+            }
+            RefPathElement *t2 = utarray_eltptr(ref_path, i + 1L);
+            t1->activatep = 0;
+            t2->activatep = 1;
+            return;
+        }
+    }
 }
 
 void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) {
@@ -1363,10 +1414,10 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
     for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
         LISP current_traced_obj = gc_traced_objs[i];
 
-        // 内部consを無視
-        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
-            continue;
-        }
+//        // 内部consを無視
+//        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
+//            continue;
+//        }
 
         char tmp_type_str[40] = "";
         translate_type_detail(tmp_type_str, current_traced_obj);
@@ -1419,6 +1470,12 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
             }
 
             strcat(path_info, "->\n");
+        } else {
+            // TODO 需要优化，现在的做法效率低下(还需要全路径的比较)
+            if (i > 0) {
+                LISP last_traced_obj = gc_traced_objs[i - 1];
+                try_update_active_mark(last_traced_obj, current_traced_obj);
+            }
         }
     }
 
@@ -1449,7 +1506,7 @@ short can_process_assert_dead_stage_two(LISP ptr) {
             continue;
         }
 
-        if (tc_struct_instance_with_rec == ptr->type && !struct_def_eqp(ptr, tmp_last_element)) {
+        if ((tc_struct_instance_with_rec == ptr->type || tc_struct_instance == ptr->type) && !struct_def_eqp(ptr, tmp_last_element)) {
             continue;
         }
 
@@ -1527,11 +1584,13 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
         gc_traced_obj_fields = (long *) malloc(sizeof(long) * heap_size);
     }
 
-    ++last_index_of_gc_traced_objs;
-    gc_traced_objs[last_index_of_gc_traced_objs] = ptr;
-    if (previous_obj_selected_field >= 0) {
-        long last_index_of_gc_traced_obj_fields = last_index_of_gc_traced_objs - 1L;
-        gc_traced_obj_fields[last_index_of_gc_traced_obj_fields] = previous_obj_selected_field;
+    if (!(tc_cons == ptr->type && !ptr->storage_as.cons.is_external_cons)) {
+        ++last_index_of_gc_traced_objs;
+        gc_traced_objs[last_index_of_gc_traced_objs] = ptr;
+        if (previous_obj_selected_field >= 0) {
+            long last_index_of_gc_traced_obj_fields = last_index_of_gc_traced_objs - 1L;
+            gc_traced_obj_fields[last_index_of_gc_traced_obj_fields] = previous_obj_selected_field;
+        }
     }
 
     // assert-dead check

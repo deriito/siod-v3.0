@@ -4,22 +4,50 @@
 (define-struct C ("field1" "field2"))
 
 
-(define a1 (new-struct-instance A) 7)
-(define b1 (new-struct-instance B) 8)
-(define c1 (new-struct-instance C) 9)
+;; 1回目
+(define a1 (new-struct-instance A) 8)
 
-(set-field a1 "field1" b1 11)
-(set-field b1 "field2" c1 12)
+(let ((b1 (new-struct-instance B))
+      (c1 (new-struct-instance C)))
+     (begin
+       (set-field a1 "field1" b1 13)
+       (set-field b1 "field2" c1 14)
+       (assert-dead c1 15)))
 
-(assert-dead c1 14)
 (gc)
 
 
-(define a2 (new-struct-instance A) 18)
-(define b2 (new-struct-instance B) 19)
-(define c2 (new-struct-instance C) 20)
+;; 2回目
+(define a2 (new-struct-instance A) 21)
 
-(set-field a2 "field1" b2 22)
-(set-field b2 "field2" c2 23)
+(let ((b2 (new-struct-instance B))
+      (c2 (new-struct-instance C)))
+     (begin
+       (set-field a2 "field1" b2 26)
+       (set-field b2 "field2" c2 27)))
+
+(gc)
+
+
+;; 3回目
+(define a3 (new-struct-instance A) 33)
+
+(let ((b3 (new-struct-instance B))
+      (c3 (new-struct-instance C)))
+     (begin
+       (set-field a3 "field1" b3 38)
+       (set-field b3 "field2" c3 39)))
+
+(gc)
+
+
+;; 4回目
+(define a4 (new-struct-instance A) 45)
+
+(let ((b4 (new-struct-instance B))
+      (c4 (new-struct-instance C)))
+     (begin
+       (set-field a4 "field1" b4 50)
+       (set-field b4 "field2" c4 51)))
 
 (gc)
