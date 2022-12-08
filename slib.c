@@ -1345,7 +1345,7 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
     ptr->assert_dead = HAD_BEEN_ASSERTED;
     tmp_assert_dead_info->stage = ASSERT_DEAD_STAGE_DETAILED;
 
-    printf("\033[31mAssert-Dead Stage One Done.\n\033[0m");
+    printf("\033[31mAssert-Dead Stage One Done.\n\n\033[0m");
 }
 
 void translate_to_line_num_str(char* dst, long line_num) {
