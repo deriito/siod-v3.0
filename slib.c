@@ -163,21 +163,27 @@ static long *gc_traced_obj_fields = NULL;
 typedef struct {
     short lisp_obj_type;
     long assign_slot_type;
-    short activatep; // 用于标记分段激活的代入对(即，当前带有标记的type->下一个type)
+    LISP struct_def_obj; // if it has
     short checked; // 该类型的obj被记录过行号信息
-    LISP class_name_sym_obj;
-} RefPathElement;
+} ObjLinkElement;
 
-// 各个位置的assert-dead的调用信息以及收集的参照パス
+typedef struct {
+    UT_array *link_data;
+    long active_ele_idx; // 用于标记激活的type
+} ObjectLink;
+
+// 当前所存在的object links
+static UT_array *object_links = NULL;
+
+// 各个位置的assert-dead的调用信息
 typedef struct {
     long line_num;
     short stage;
-    UT_array *ref_path;
     UT_hash_handle hh; /* makes this structure hashtable */
-} AssertDeadInfo;
+} AssertDeadCallInfo;
 
 // assert-dead的相关信息
-static AssertDeadInfo *assert_dead_info_table = NULL;
+static AssertDeadCallInfo *assert_dead_call_info_table = NULL;
 
 LISP get_struct_def_obj(LISP ptr) {
     if (tc_struct_instance == ptr->type) {
@@ -191,19 +197,19 @@ LISP get_struct_def_obj(LISP ptr) {
     return (NIL);
 }
 
-short struct_def_eqp(LISP ptr, RefPathElement *ref_path_ele) {
+short struct_def_eqp(LISP ptr, ObjLinkElement *obj_path_ele) {
     if (ptr->type != tc_struct_instance && ptr->type != tc_struct_instance_with_rec) {
         return 0;
     }
 
-    if (ref_path_ele->lisp_obj_type != tc_struct_instance && ref_path_ele->lisp_obj_type != tc_struct_instance_with_rec) {
+    if (obj_path_ele->lisp_obj_type != tc_struct_instance && obj_path_ele->lisp_obj_type != tc_struct_instance_with_rec) {
         return 0;
     }
 
     LISP struct_def = get_struct_def_obj(ptr);
 
     LISP ptr_class_name_sym_obj = struct_def->storage_as.struct_def.class_name_sym;
-    LISP ref_path_ele_class_name_sym_obj = ref_path_ele->class_name_sym_obj;
+    LISP ref_path_ele_class_name_sym_obj = obj_path_ele->struct_def_obj->storage_as.struct_def.class_name_sym;
     if (0 != strcmp(ptr_class_name_sym_obj->storage_as.symbol.pname, ref_path_ele_class_name_sym_obj->storage_as.symbol.pname)) {
         return 0;
     }
@@ -211,46 +217,94 @@ short struct_def_eqp(LISP ptr, RefPathElement *ref_path_ele) {
     return 1;
 }
 
-short judge_ref_pattern(LISP assign_obj, LISP assigned_obj, RefPathElement *assign_element, RefPathElement *assigned_element) {
-    if (assign_obj->type != assign_element->lisp_obj_type && !struct_def_eqp(assign_obj, assign_element)) {
+short compare_traced_objs_and_obj_link(long last_index_of_gc_traced_objs, ObjectLink *obj_link) {
+    UT_array *link_data = obj_link->link_data;
+    if (NULL == link_data) {
         return 0;
     }
-    if (assigned_obj->type != assigned_element->lisp_obj_type && !struct_def_eqp(assigned_obj, assigned_element)) {
+
+    long len = utarray_len(link_data);
+    if (len - 1 != last_index_of_gc_traced_objs) {
+        return 0;
+    }
+
+    for (long i = 0; i < len; ++i) {
+        ObjLinkElement *tmp_ol_ele = utarray_eltptr(link_data, i);
+        LISP tmp_ptr = gc_traced_objs[i];
+
+        if ((i != len - 1) && (gc_traced_obj_fields[i] != tmp_ol_ele->assign_slot_type)) {
+            return 0;
+        }
+
+        if (tmp_ptr->type != tmp_ol_ele->lisp_obj_type) {
+            if (struct_def_eqp(tmp_ptr, tmp_ol_ele)) {
+                continue;
+            }
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+ObjectLink *find_the_obj_link(long last_index_of_gc_traced_objs) {
+    if (NULL == object_links) {
+        return NULL;
+    }
+
+    for (long i = 0; i < utarray_len(object_links); ++i) {
+        ObjectLink *obj_link = utarray_eltptr(object_links, i);
+        if (NULL == obj_link) {
+            continue;
+        }
+        if (!compare_traced_objs_and_obj_link(last_index_of_gc_traced_objs, obj_link)) {
+            continue;
+        }
+        return obj_link;
+    }
+
+    return NULL;
+}
+
+short judge_ref_pattern(LISP assign_obj, long field_idx, LISP assigned_obj, ObjLinkElement *assign_ele, ObjLinkElement *assigned_ele) {
+    if (field_idx != assign_ele->assign_slot_type) {
+        return 0;
+    }
+    if (assign_obj->type != assign_ele->lisp_obj_type && !struct_def_eqp(assign_obj, assign_ele)) {
+        return 0;
+    }
+    if (assigned_obj->type != assigned_ele->lisp_obj_type && !struct_def_eqp(assigned_obj, assigned_ele)) {
         return 0;
     }
     return 1;
 }
 
-RefPathElement *focusing_ref_patternp(LISP assign_obj, LISP assigned_obj) {
-    AssertDeadInfo *tmp_assert_dead_info;
-    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
-        UT_array *ref_path = tmp_assert_dead_info->ref_path;
-        if (NULL == ref_path) {
+ObjLinkElement *is_focusing_ref_pattern(LISP assign_obj, long field_idx, LISP assigned_obj) {
+    if (NULL == object_links) {
+        return NULL;
+    }
+
+    long link_num = utarray_len(object_links);
+    for (long i = 0; i < link_num; ++i) {
+        ObjectLink *tmp_link = utarray_eltptr(object_links, i);
+        UT_array *link_data = tmp_link->link_data;
+        if (NULL == link_data) {
             continue;
         }
-
-        long ref_path_length = utarray_len(ref_path);
-        if (ref_path_length <= LONG_REF_PATH_THRESHOLD) {
-            for (long i = 0; i < ref_path_length - 1L; ++i) {
-                RefPathElement *assign_element = utarray_eltptr(ref_path, i);
-                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
-                if (judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
-                    return assign_element;
-                }
-            }
-        } else {
-            for (int i = 0; i < ref_path_length - 1L; ++i) {
-                RefPathElement *assign_element = utarray_eltptr(ref_path, i);
-                if (!assign_element->activatep) {
-                    continue;
-                }
-                RefPathElement *assigned_element = utarray_eltptr(ref_path, i + 1L);
-                if (!judge_ref_pattern(assign_obj, assigned_obj, assign_element, assigned_element)) {
-                    break;
-                }
-                return assign_element;
-            }
+        long active_ele_idx = tmp_link->active_ele_idx;
+        if (active_ele_idx < 0) {
+            continue;
         }
+        long link_len = utarray_len(link_data);
+        if (active_ele_idx >= link_len - 1L) {
+            continue;
+        }
+        ObjLinkElement *assign_ele = utarray_eltptr(link_data, active_ele_idx);
+        ObjLinkElement *assigned_ele = utarray_eltptr(tmp_link->link_data, active_ele_idx + 1L);
+        if (!judge_ref_pattern(assign_obj, field_idx, assigned_obj, assign_ele, assigned_ele)) {
+            continue;
+        }
+        return assign_ele;
     }
     return NULL;
 }
@@ -269,7 +323,7 @@ void try_record_assign_site(LISP assign_obj, LISP assigned_obj, long assign_site
         assigned_obj = CAR(assigned_obj);
     }
 
-    RefPathElement *assign_element = focusing_ref_patternp(assign_obj, assigned_obj);
+    ObjLinkElement *assign_element = is_focusing_ref_pattern(assign_obj, field_index, assigned_obj);
     if (NULL == assign_element) {
         return;
     }
@@ -1262,25 +1316,128 @@ void translate_type_detail(char *res, LISP ptr) {
     }
 }
 
-void try_update_struct_instance_structure(LISP struct_instance, long selected_field) {
-    if (struct_instance->type != tc_struct_instance && struct_instance->type != tc_struct_instance_with_rec) {
+char *gen_type_str(ObjLinkElement *obj_link_ele) {
+    short type = obj_link_ele->lisp_obj_type;
+    if (tc_cons == type) {
+        return TYPE_STR_CONS;
+    } else if (tc_flonum == type) {
+        return TYPE_STR_FLONUM;
+    }  else if (tc_symbol == type) {
+        return TYPE_STR_SYMBOL;
+    } else if (tc_closure == type) {
+        return TYPE_STR_CLOSURE;
+    } else if (tc_string == type) {
+        return TYPE_STR_STRING;
+    } else if (tc_c_file == type) {
+        return TYPE_STR_FILE;
+    } else if (tc_struct_instance == type || tc_struct_instance_with_rec == type) {
+        return obj_link_ele->struct_def_obj->storage_as.struct_def.class_name_sym->storage_as.symbol.pname;
+    } else {
+        err("see gen_type_str", NIL);
+    }
+}
+
+void try_update_all_struct_defs() {
+    if (NULL == object_links) {
         return;
     }
 
-    LISP struct_def = get_struct_def_obj(struct_instance);
-
-    if (struct_def->storage_as.struct_def.length <= 0) {
-        struct_def->storage_as.struct_def.length = 1;
-        struct_def->storage_as.struct_def.assign_field_indexes = (long *) must_malloc(sizeof(long));
-        struct_def->storage_as.struct_def.assign_field_indexes[0] = selected_field;
-    } else {
-        long original_length = struct_def->storage_as.struct_def.length;
-        long *tmp = (long *) must_malloc((original_length + 1) * sizeof(long));
-        for (long i = 0; i < original_length; ++i) {
-            tmp[i] = struct_def->storage_as.struct_def.assign_field_indexes[i];
-        }
-        tmp[original_length] = selected_field;
+    long link_num = utarray_len(object_links);
+    if (link_num <= 0) {
+        return;
     }
+
+    // 時間的データ構造切り替えの情報
+    typedef struct {
+        const char *type_str; /* key */
+        LISP struct_def_obj;
+        long *record_slot_idx;
+        long len;
+        UT_hash_handle hh; /* makes this structure hashtable */
+    } TmpInfo;
+
+    TmpInfo *tmp_infos = NULL;
+
+    // 增量
+    for (long i = 0; i < link_num; ++i) {
+        ObjectLink *tmp_obj_link = utarray_eltptr(object_links, i);
+        long active_ele_idx = tmp_obj_link->active_ele_idx;
+        if (active_ele_idx < 0) {
+            continue;
+        }
+
+        UT_array *tmp_link_data = tmp_obj_link->link_data;
+        long tmp_link_data_len = utarray_len(tmp_link_data);
+        if (tmp_link_data_len <= 0) {
+            continue;
+        }
+
+        if (active_ele_idx >= tmp_link_data_len - 1) {
+            continue;
+        }
+
+        ObjLinkElement *active_link_ele = utarray_eltptr(tmp_link_data, active_ele_idx);
+        const char *type_key = gen_type_str(active_link_ele);
+
+        TmpInfo *active_tmp_info = NULL;
+        HASH_FIND_STR(tmp_infos, type_key, active_tmp_info);
+
+        if (NULL == active_tmp_info) {
+            active_tmp_info = (TmpInfo *) malloc(sizeof(TmpInfo));
+            active_tmp_info->type_str = type_key;
+            active_tmp_info->struct_def_obj = active_link_ele->struct_def_obj;
+            active_tmp_info->len = 0;
+            HASH_ADD_KEYPTR(hh, tmp_infos, active_tmp_info->type_str, strlen(active_tmp_info->type_str), active_tmp_info);
+        }
+
+        long len = active_tmp_info->len;
+        if (len <= 0) {
+            active_tmp_info->record_slot_idx = (long *)malloc(sizeof(long));
+            active_tmp_info->record_slot_idx[0] = active_link_ele->assign_slot_type;
+            active_tmp_info->len += 1L;
+        } else {
+            short need_updatep = 1;
+            for (long j = 0; j < len; ++j) {
+                if (active_tmp_info->record_slot_idx[j] == active_link_ele->assign_slot_type) {
+                    need_updatep = 0;
+                    break;
+                }
+            }
+
+            if (need_updatep) {
+                long *tmp_long_arr = (long *)malloc(sizeof(long) * (len + 1L));
+                for (long j = 0; j < len; ++j) {
+                    tmp_long_arr[j] = active_tmp_info->record_slot_idx[j];
+                }
+                tmp_long_arr[len] = active_link_ele->assign_slot_type;
+                free(active_tmp_info->record_slot_idx);
+                active_tmp_info->record_slot_idx = tmp_long_arr;
+                active_tmp_info->len += 1L;
+            }
+        }
+    }
+
+    for (TmpInfo *tmp = tmp_infos; NULL != tmp; tmp = tmp->hh.next) {
+        // TODO 当前只实现了lisp struct的类型变换
+        if (NULL != tmp->struct_def_obj || NNULLP(tmp->struct_def_obj)) {
+            LISP struct_def_obj = tmp->struct_def_obj;
+            while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
+                struct_def_obj = struct_def_obj->storage_as.struct_def.next;
+            }
+
+            LISP next_struct_obj = newcell(tc_struct_def);
+            next_struct_obj->storage_as.struct_def.class_name_sym = struct_def_obj->storage_as.struct_def.class_name_sym;
+            next_struct_obj->storage_as.struct_def.dim = struct_def_obj->storage_as.struct_def.dim;
+            next_struct_obj->storage_as.struct_def.field_name_strs = struct_def_obj->storage_as.struct_def.field_name_strs;
+            next_struct_obj->storage_as.struct_def.length = tmp->len;
+            next_struct_obj->storage_as.struct_def.assign_field_indexes = tmp->record_slot_idx;
+            next_struct_obj->storage_as.struct_def.next = NIL;
+
+            struct_def_obj->storage_as.struct_def.next = next_struct_obj;
+        }
+    }
+
+    free(tmp_infos);
 }
 
 void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) {
@@ -1290,60 +1447,50 @@ void process_assert_dead_stage_one(LISP ptr, long last_index_of_gc_traced_objs) 
         return;
     }
 
-    AssertDeadInfo *tmp_assert_dead_info;
-    HASH_FIND(hh, assert_dead_info_table, &(ptr->asserted_dead_at), sizeof(long), tmp_assert_dead_info);
+    AssertDeadCallInfo *tmp_assert_dead_info;
+    HASH_FIND(hh, assert_dead_call_info_table, &(ptr->asserted_dead_at), sizeof(long), tmp_assert_dead_info);
     if (NULL == tmp_assert_dead_info) {
         printf("\033[31mRuntime Exception: Why the tmpAssertDeadInfo is NULL? (see \"process_assert_dead_stage_one()\")\n\033[0m");
         exit(-1);
         return;
     }
 
-    for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
-        LISP current_traced_obj = gc_traced_objs[i];
+    ObjectLink *object_link = find_the_obj_link(last_index_of_gc_traced_objs);
+    if (NULL == object_link) {
+        object_link = (ObjectLink *) malloc(sizeof(ObjectLink));
+        object_link->link_data = NULL;
+        object_link->active_ele_idx = 0;
 
-//        // 内部consを無視
-//        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
-//            continue;
-//        }
+        for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
+            LISP current_traced_obj = gc_traced_objs[i];
 
-        // 参照パスを記録しておく
-        RefPathElement *new_ref_path_element = (RefPathElement *) malloc(sizeof(RefPathElement));
+            // 参照パスを記録しておく
+            ObjLinkElement *new_obj_link_element = (ObjLinkElement *) malloc(sizeof(ObjLinkElement));
 
-        if (tc_struct_instance == current_traced_obj->type && i != last_index_of_gc_traced_objs) {
-            new_ref_path_element->lisp_obj_type = tc_struct_instance_with_rec;
-        } else {
-            new_ref_path_element->lisp_obj_type = current_traced_obj->type;
-        }
+            new_obj_link_element->lisp_obj_type = current_traced_obj->type;
+            new_obj_link_element->assign_slot_type = gc_traced_obj_fields[i];
+            new_obj_link_element->struct_def_obj = get_struct_def_obj(current_traced_obj);
+            new_obj_link_element->checked = 0;
 
-        new_ref_path_element->assign_slot_type = gc_traced_obj_fields[i];
-        new_ref_path_element->activatep = 0;
-        new_ref_path_element->checked = 0;
-
-        if (current_traced_obj->type == tc_struct_instance || current_traced_obj->type == tc_struct_instance_with_rec) {
-            if (tc_struct_instance == ptr->type) {
-                new_ref_path_element->class_name_sym_obj = current_traced_obj->storage_as.struct_instance.struct_def_obj->storage_as.struct_def.class_name_sym;
-            } else {
-                new_ref_path_element->class_name_sym_obj = current_traced_obj->storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.class_name_sym;
+            if (NULL == object_link->link_data) {
+                UT_icd obj_link_elements_icd = {sizeof(ObjLinkElement), NULL, NULL, NULL};
+                utarray_new(object_link->link_data, &obj_link_elements_icd);
             }
+
+            utarray_push_back(object_link->link_data, new_obj_link_element);
         }
 
-        if (NULL == tmp_assert_dead_info->ref_path) {
-            UT_icd ref_path_elements_icd = {sizeof(RefPathElement), NULL, NULL, NULL};
-            utarray_new(tmp_assert_dead_info->ref_path, &ref_path_elements_icd);
-            // 参照パスの先頭要素の「段階的記録マーク」をオンにしておく
-            new_ref_path_element->activatep = 1;
+        if (NULL == object_links) {
+            UT_icd obj_links_icd = {sizeof(ObjectLink), NULL, NULL, NULL};
+            utarray_new(object_links, &obj_links_icd);
         }
-
-        utarray_push_back(tmp_assert_dead_info->ref_path, new_ref_path_element);
-
-        if (i != last_index_of_gc_traced_objs) {
-            // 動的型の切り替え情報を記録しておく
-            try_update_struct_instance_structure(current_traced_obj, gc_traced_obj_fields[i]);
-        }
+        utarray_push_back(object_links, object_link);
     }
 
     ptr->assert_dead = HAD_BEEN_ASSERTED;
     tmp_assert_dead_info->stage = ASSERT_DEAD_STAGE_DETAILED;
+
+    try_update_all_struct_defs();
 
     printf("\033[31mAssert-Dead Stage One Done.\n\n\033[0m");
 }
@@ -1355,39 +1502,23 @@ void translate_to_line_num_str(char* dst, long line_num) {
     sprintf(dst, "@ln%ld", line_num);
 }
 
-void try_update_active_mark(LISP ref_path_last2_obj, LISP ref_path_last_obj) {
-    AssertDeadInfo *tmp_assert_dead_info;
-    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
-        UT_array *ref_path = tmp_assert_dead_info->ref_path;
-        if (NULL == ref_path) {
-            continue;
-        }
-
-        long ref_path_length = utarray_len(ref_path);
-        if (ref_path_length < 2) {
-            continue;
-        }
-
-        RefPathElement *last2 = utarray_eltptr(ref_path, ref_path_length - 2L);
-        RefPathElement *last = utarray_eltptr(ref_path, ref_path_length - 1L);
-        if (!judge_ref_pattern(ref_path_last2_obj, ref_path_last_obj, last2, last)) {
-            continue;
-        }
-
-        for (long i = 0; i < ref_path_length - 1L; ++i) {
-            RefPathElement *t1 = utarray_eltptr(ref_path, i);
-            if (!t1->activatep) {
-                continue;
-            }
-            if (!t1->checked) {
-                return;
-            }
-            RefPathElement *t2 = utarray_eltptr(ref_path, i + 1L);
-            t1->activatep = 0;
-            t2->activatep = 1;
-            return;
-        }
+void try_update_obj_link_active_info(long last_index_of_gc_traced_objs) {
+    ObjectLink *object_link = find_the_obj_link(last_index_of_gc_traced_objs);
+    if (NULL == object_link) {
+        return;
     }
+
+    long link_data_len = utarray_len(object_link->link_data);
+    if (object_link->active_ele_idx >= link_data_len - 1) {
+        return;
+    }
+
+    ObjLinkElement *cur_ele = utarray_eltptr(object_link->link_data, object_link->active_ele_idx);
+    if (!cur_ele->checked) {
+        return;
+    }
+
+    object_link->active_ele_idx += 1L;
 }
 
 void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) {
@@ -1413,11 +1544,6 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
 
     for (long i = 0; i <= last_index_of_gc_traced_objs; ++i) {
         LISP current_traced_obj = gc_traced_objs[i];
-
-//        // 内部consを無視
-//        if (current_traced_obj->type == tc_cons && !current_traced_obj->storage_as.cons.is_external_cons) {
-//            continue;
-//        }
 
         char tmp_type_str[40] = "";
         translate_type_detail(tmp_type_str, current_traced_obj);
@@ -1470,50 +1596,23 @@ void process_assert_dead_stage_two(LISP ptr, long last_index_of_gc_traced_objs) 
             }
 
             strcat(path_info, "->\n");
-        } else {
-            // TODO 需要优化，现在的做法效率低下(还需要全路径的比较)
-            if (i > 0) {
-                LISP last_traced_obj = gc_traced_objs[i - 1];
-                try_update_active_mark(last_traced_obj, current_traced_obj);
-            }
         }
     }
+
+    try_update_obj_link_active_info(last_index_of_gc_traced_objs);
+    try_update_all_struct_defs();
 
     printf("\033[31mWarning: an object that was asserted dead is reachable.\n"
            "Type: %s;\nPath to object: %s\n\n\033[0m",
            suspect_type_str, path_info);
 }
 
-short can_process_assert_dead_stage_two(LISP ptr) {
-    AssertDeadInfo *tmp_assert_dead_info;
-    for (tmp_assert_dead_info = assert_dead_info_table; tmp_assert_dead_info != NULL; tmp_assert_dead_info = tmp_assert_dead_info->hh.next) {
-        if (tmp_assert_dead_info->stage != ASSERT_DEAD_STAGE_DETAILED) {
-            continue;
-        }
-
-        UT_array *refPath = tmp_assert_dead_info->ref_path;
-        if (NULL == refPath) {
-            continue;
-        }
-
-        int refPathLength = utarray_len(refPath);
-        if (refPathLength <= 0) {
-            continue;
-        }
-
-        RefPathElement *tmp_last_element = utarray_back(refPath);
-        if (ptr->type != tmp_last_element->lisp_obj_type) {
-            continue;
-        }
-
-        if ((tc_struct_instance_with_rec == ptr->type || tc_struct_instance == ptr->type) && !struct_def_eqp(ptr, tmp_last_element)) {
-            continue;
-        }
-
-        return 1;
+short can_process_assert_dead_stage_two(long last_index_of_gc_traced_objs) {
+    ObjectLink *object_link = find_the_obj_link(last_index_of_gc_traced_objs);
+    if (NULL == object_link) {
+        return 0;
     }
-
-    return 0;
+    return 1;
 }
 
 // assert-dead with new_struct_instance features
@@ -1528,18 +1627,17 @@ LISP assert_dead(LISP ptr, LISP ln) {
 
     long line_num = (long) ln->storage_as.flonum.data;
 
-    AssertDeadInfo *assert_dead_info;
-    HASH_FIND(hh, assert_dead_info_table, &line_num, sizeof(long), assert_dead_info);
+    AssertDeadCallInfo *assert_dead_info;
+    HASH_FIND(hh, assert_dead_call_info_table, &line_num, sizeof(long), assert_dead_info);
     if (NULL != assert_dead_info) {
         return (NIL);
     }
 
-    AssertDeadInfo *new_assert_dead_info = (AssertDeadInfo *) malloc(sizeof(AssertDeadInfo));
+    AssertDeadCallInfo *new_assert_dead_info = (AssertDeadCallInfo *) malloc(sizeof(AssertDeadCallInfo));
     new_assert_dead_info->line_num = line_num;
     new_assert_dead_info->stage = ASSERT_DEAD_STAGE_ROUGH;
-    new_assert_dead_info->ref_path = NULL;
 
-    HASH_ADD(hh, assert_dead_info_table, line_num, sizeof(long), new_assert_dead_info);
+    HASH_ADD(hh, assert_dead_call_info_table, line_num, sizeof(long), new_assert_dead_info);
 
     ptr->assert_dead = HAS_BEEN_ASSERTED;
     ptr->asserted_dead_at = line_num;
@@ -1552,8 +1650,8 @@ short can_process_assert_dead_stage_one(LISP ptr) {
     }
 
     long line_num = ptr->asserted_dead_at;
-    AssertDeadInfo *tmp_assert_dead_info;
-    HASH_FIND(hh, assert_dead_info_table, &line_num, sizeof(long), tmp_assert_dead_info);
+    AssertDeadCallInfo *tmp_assert_dead_info;
+    HASH_FIND(hh, assert_dead_call_info_table, &line_num, sizeof(long), tmp_assert_dead_info);
     if (NULL == tmp_assert_dead_info) {
         return 0;
     }
@@ -1596,7 +1694,7 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
     // assert-dead check
     if (can_process_assert_dead_stage_one(ptr)) {
         process_assert_dead_stage_one(ptr, last_index_of_gc_traced_objs);
-    } else if (can_process_assert_dead_stage_two(ptr)) {
+    } else if (can_process_assert_dead_stage_two(last_index_of_gc_traced_objs)) {
         process_assert_dead_stage_two(ptr, last_index_of_gc_traced_objs);
     }
 
@@ -1605,25 +1703,25 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
             break;
         case tc_cons:
             gc_mark(CAR(ptr), last_index_of_gc_traced_objs, CONS_CAR_TYPE_ID);
-            ptr = CDR(ptr);
             previous_obj_selected_field = CONS_CDR_TYPE_ID;
+            ptr = CDR(ptr);
             goto gc_mark_loop;
         case tc_symbol:
-            ptr = VCELL(ptr);
             previous_obj_selected_field = SYMBOL_VCELL_TYPE_ID;
+            ptr = VCELL(ptr);
             goto gc_mark_loop;
         case tc_closure:
             gc_mark((*ptr).storage_as.closure.code, last_index_of_gc_traced_objs, CLOSURE_CODE_TYPE_ID);
-            ptr = (*ptr).storage_as.closure.env;
             previous_obj_selected_field = CLOSURE_ENV_TYPE_ID;
+            ptr = (*ptr).storage_as.closure.env;
             goto gc_mark_loop;
         case tc_struct_instance:
-            for (long i = 0; i < (*ptr).storage_as.struct_instance.dim; ++i) {
+            for (long i = 0; i < (*ptr).storage_as.struct_instance.struct_def_obj->storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance.data[i], last_index_of_gc_traced_objs, i);
             }
             break;
         case tc_struct_instance_with_rec:
-            for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.dim; ++i) {
+            for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
             }
             break;
@@ -1631,7 +1729,9 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
             for (long i = 0; i < (*ptr).storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_def.field_name_strs[i], last_index_of_gc_traced_objs, i);
             }
-            break;
+            previous_obj_selected_field = (*ptr).storage_as.struct_def.dim + 1L;
+            ptr = (*ptr).storage_as.struct_def.next;
+            goto gc_mark_loop;
         case tc_subr_0:
         case tc_subr_1:
         case tc_subr_2:
@@ -1724,6 +1824,9 @@ void gc_sweep(void) {
                         case tc_lsubr:
                         case tc_fsubr:
                         case tc_msubr:
+                        case tc_struct_instance:
+                        case tc_struct_instance_with_rec:
+                        case tc_struct_def:
                             break;
                         default:
                             p = get_user_type_hooks(TYPE(ptr));
@@ -2025,14 +2128,14 @@ LISP leval_define(LISP args, LISP env) {
 
     if NNULLP(tmp) {
         if (recording_assign_site_on) {
-            try_record_assign_site(tmp, val, assign_site, 1);
+            try_record_assign_site(tmp, val, assign_site, 0);
         }
         return (CAR(tmp) = val);
     }
 
     if NULLP(env) {
         if (recording_assign_site_on) {
-            try_record_assign_site(var, val, assign_site, 1);
+            try_record_assign_site(var, val, assign_site, 0);
         }
         return (VCELL(var) = val);
     }
@@ -2043,7 +2146,7 @@ LISP leval_define(LISP args, LISP env) {
 
     if (recording_assign_site_on) {
         // cdr(tmp) 为最新frame的实参列表
-        try_record_assign_site(cdr(tmp), val, assign_site, 1);
+        try_record_assign_site(cdr(tmp), val, assign_site, 0);
     }
     return (val);
 }
@@ -2309,7 +2412,7 @@ LISP lprin1f(LISP exp, FILE *f) {
             lprin1f((*exp).storage_as.struct_def.class_name_sym, f);
             fput_st(f, " (");
             for (long i = 0; i < exp->storage_as.struct_def.dim; ++i) {
-                lprin1f((*exp).storage_as.struct_def.field_name_strs[i], f);
+                lprin1f((*exp).storage_as.struct_def.field_name_strs[i]->storage_as.string.data, f);
                 if (i != exp->storage_as.struct_def.dim - 1) {
                     fput_st(f, " ");
                 }
@@ -2730,7 +2833,7 @@ LISP nreverse(LISP x) {
 }
 
 /**
- * (define class_name_sym_str ("field1" "field2" "field3" ...))
+ * (define class_name_sym_str (field1 field2 field3 ...))
  */
 LISP define_struct(LISP args, LISP env) {
     LISP class_name = car(args);
@@ -2761,22 +2864,10 @@ LISP define_struct(LISP args, LISP env) {
     }
     class_obj->storage_as.struct_def.length = 0;
     class_obj->storage_as.struct_def.assign_field_indexes = NULL;
+    class_obj->storage_as.struct_def.next = NIL;
 
-//    LISP tmp = envlookup(class_name, env);
-//
-//    if NNULLP(tmp) {
-//        return (CAR(tmp) = class_obj);
-//    }
-
-//    if NULLP(env) {
-        return (VCELL(class_name) = class_obj);
-//    }
-
-//    tmp = car(env);
-//    setcar(tmp, cons(class_name, car(tmp)));
-//    setcdr(tmp, cons(class_name, cdr(tmp)));
-//
-//    return (class_obj);
+    // 定义的struct为全局的
+    return (VCELL(class_name) = class_obj);
 }
 
 // create instance of a struct def
@@ -2785,26 +2876,27 @@ LISP new_struct_instance(LISP struct_def) {
         err("wrong struct_def obj!(see new_struct_instance)", struct_def);
     }
 
+    while (NNULLP(struct_def->storage_as.struct_def.next)) {
+        struct_def = struct_def->storage_as.struct_def.next;
+    }
+
     long length = struct_def->storage_as.struct_def.length;
     long type = length <= 0 ? tc_struct_instance : tc_struct_instance_with_rec;
     LISP instance = newcell(type);
 
     long dim = struct_def->storage_as.struct_def.dim;
     if (tc_struct_instance == type) {
-        instance->storage_as.struct_instance.dim = dim;
         instance->storage_as.struct_instance.struct_def_obj = struct_def;
         instance->storage_as.struct_instance.data = (LISP *) must_malloc(dim * sizeof(LISP));
         for (long i = 0; i < dim; ++i) {
             instance->storage_as.struct_instance.data[i] = NIL;
         }
     } else {
-        instance->storage_as.struct_instance_with_rec.dim = dim;
         instance->storage_as.struct_instance_with_rec.struct_def_obj = struct_def;
         instance->storage_as.struct_instance_with_rec.data = (LISP *) must_malloc(dim * sizeof(LISP));
         for (long i = 0; i < dim; ++i) {
             instance->storage_as.struct_instance_with_rec.data[i] = NIL;
         }
-        instance->storage_as.struct_instance_with_rec.length = length;
         instance->storage_as.struct_instance_with_rec.assign_sites = (long *) must_malloc(length * sizeof(long));
         memset(instance->storage_as.struct_instance_with_rec.assign_sites, 0, length);
     }

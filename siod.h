@@ -100,25 +100,23 @@ struct obj {
         } c_file;
 
         struct {
-            long dim; // data配列の長さ
             struct obj **data; // fieldデータ
             struct obj *struct_def_obj;
         } struct_instance;
 
         struct {
-            long dim;
             struct obj **data;
             struct obj *struct_def_obj;
-            long length;
             long *assign_sites; // 行番号情報
         } struct_instance_with_rec;
 
         struct {
             struct obj *class_name_sym;
-            long dim;
+            long dim; // struct instanceのdata配列の長さ
             struct obj **field_name_strs;
-            long length;
+            long length; // assign_sitesとassign_field_indexesの長さ
             long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
+            struct obj *next; // shadow class def
         } struct_def;
     } storage_as;
 };
@@ -474,8 +472,6 @@ LISP nreverse(LISP);
 #define TYPE_STR_STRING "STRING"
 #define TYPE_STR_FILE "FILE"
 #define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
-
-#define LONG_REF_PATH_THRESHOLD (2) // threshold of length of a long focusing reference path
 
 // data structure field type ids
 #define CONS_CAR_TYPE_ID 0
