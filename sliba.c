@@ -64,7 +64,7 @@ LISP array_gc_mark(LISP ptr) {
     long j;
     if TYPEP(ptr, tc_lisp_array)
         for (j = 0; j < ptr->storage_as.lisp_array.dim; ++j)
-            gc_mark(ptr->storage_as.lisp_array.data[j], -1L);
+            gc_mark(ptr->storage_as.lisp_array.data[j], -1L, -1);
     return (NIL);
 }
 
@@ -422,6 +422,7 @@ long c_sxhash(LISP obj, long n) {
         case tc_subr_1:
         case tc_subr_2:
         case tc_subr_3:
+        case tc_subr_4:
         case tc_lsubr:
         case tc_fsubr:
         case tc_msubr:
@@ -824,16 +825,28 @@ long get_c_long(LISP x) {
     return ((long) FLONM(x));
 }
 
-LISP make_list(LISP x, LISP v) {
+LISP make_list_logic(LISP x, LISP v, LISP custom_tag, LISP line_num, short is_extenal) {
     long n;
     LISP l;
     n = get_c_long(x);
     l = NIL;
     while (n > 0) {
-        l = cons(v, l);
+        if (is_extenal) {
+            l = external_cons(v, l, line_num);
+        } else {
+            l = cons(v, l);
+        }
         --n;
     }
     return (l);
+}
+
+LISP make_list(LISP x, LISP v) {
+    return (make_list_logic(x, v, NIL, 0, 0));
+}
+
+LISP make_list_external(LISP x, LISP v, LISP custom_tag, LISP line_num) {
+    return (make_list_logic(x, v, custom_tag, line_num, 1));
 }
 
 LISP lfread(LISP size, LISP file) {
@@ -977,7 +990,7 @@ void init_subrs_a(void) {
     init_subr_2("assoc", assoc);
     init_subr_1("fast-read", fast_read);
     init_subr_2("fast-print", fast_print);
-    init_subr_2("make-list", make_list);
+    init_subr_4("make-list", make_list_external);
     init_subr_2("fread", lfread);
     init_subr_2("fwrite", lfwrite);
     init_subr_1("length", llength);

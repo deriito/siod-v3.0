@@ -127,7 +127,7 @@ void gc_ms_stats_start(void);
 
 void gc_ms_stats_end(void);
 
-void gc_mark(LISP ptr, long traced_objs_tail_index);
+void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_selected_field);
 
 void mark_protected_registers(void);
 

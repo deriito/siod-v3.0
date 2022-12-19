@@ -9,82 +9,117 @@
 struct obj {
     short gc_mark;
     short type;
-    short assert_dead; // for assert_dead
+    short assert_dead; // assert-dead mark
+    short is_assign_info_recorded;
+    long asserted_dead_at; // 记录被assert-dead所mark的, 在source code中的位置
+
     union {
         struct {
             struct obj *car;
+            long car_assign_site;
             struct obj *cdr;
-        } cons;
+            long cdr_assign_site;
+            short is_external_cons;
+        } cons; // 内部cons
+
         struct {
             double data;
         } flonum;
+
         struct {
             char *pname;
             struct obj *vcell;
+            long vcell_assign_site;
         } symbol;
 
         struct {
             char *name;
-
             struct obj *(*f)(void);
         } subr0;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *);
         } subr1;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *, struct obj *);
         } subr2;
 
         struct {
             char *name;
-
             struct obj *(*f)(struct obj *, struct obj *, struct obj *);
         } subr3;
 
         struct {
             char *name;
+            struct obj *(*f)(struct obj *, struct obj *, struct obj *, struct obj *);
+        } subr4;
 
+        struct {
+            char *name;
             struct obj *(*f)(struct obj **, struct obj **);
         } subrm;
 
         struct {
             char *name;
-
             struct obj *(*f)(void *, ...);
         } subr;
 
         struct {
             struct obj *env;
+            long env_assign_site;
             struct obj *code;
+            long code_assign_site;
         } closure;
+
         struct {
             long dim;
             long *data;
         } long_array;
+
         struct {
             long dim;
             double *data;
         } double_array;
+
         struct {
             long dim;
             char *data;
         } string;
+
         struct {
             long dim;
             struct obj **data;
         } lisp_array;
+
         struct {
             FILE *f;
             char *name;
         } c_file;
-    }
-            storage_as;
+
+        struct {
+            struct obj **data; // fieldデータ
+            struct obj *struct_def_obj;
+        } struct_instance;
+
+        struct {
+            struct obj **data;
+            struct obj *struct_def_obj;
+            long *assign_sites; // 行番号情報
+        } struct_instance_with_rec;
+
+        struct {
+            struct obj *class_name_sym;
+            long dim; // struct instanceのdata配列の長さ
+            struct obj **field_name_strs;
+            long length; // assign_sitesとassign_field_indexesの長さ
+            long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
+            struct obj *pre;
+            struct obj *next; // shadow class def
+        } struct_def;
+    } storage_as;
 };
 
 #define CAR(x) ((*x).storage_as.cons.car)
@@ -95,6 +130,7 @@ struct obj {
 #define SUBR1(x) (*((*x).storage_as.subr1.f))
 #define SUBR2(x) (*((*x).storage_as.subr2.f))
 #define SUBR3(x) (*((*x).storage_as.subr3.f))
+#define SUBR4(x) (*((*x).storage_as.subr4.f))
 #define SUBRM(x) (*((*x).storage_as.subrm.f))
 #define SUBRF(x) (*((*x).storage_as.subr.f))
 #define FLONM(x) ((*x).storage_as.flonum.data)
@@ -128,6 +164,11 @@ struct obj {
 #define tc_long_array   15
 #define tc_lisp_array   16
 #define tc_c_file       17
+#define tc_subr_4 18
+#define tc_struct_instance 19
+#define tc_struct_instance_with_rec 20
+#define tc_struct_def 21
+
 #define tc_user_1 50
 #define tc_user_2 51
 #define tc_user_3 52
@@ -140,7 +181,6 @@ struct obj {
 #define tc_sys_4 94
 #define tc_sys_5 95
 
-
 #define FO_fetch 127
 #define FO_store 126
 #define FO_list  125
@@ -152,11 +192,11 @@ typedef struct obj *LISP;
 
 typedef LISP (*SUBR_FUNC)(void);
 
-#define CONSP(x)   TYPEP(x,tc_cons)
+#define CONSP(x) TYPEP(x,tc_cons)
 #define FLONUMP(x) TYPEP(x,tc_flonum)
 #define SYMBOLP(x) TYPEP(x,tc_symbol)
 
-#define NCONSP(x)   NTYPEP(x,tc_cons)
+#define NCONSP(x) NTYPEP(x,tc_cons)
 #define NFLONUMP(x) NTYPEP(x,tc_flonum)
 #define NSYMBOLP(x) NTYPEP(x,tc_symbol)
 
@@ -218,6 +258,8 @@ LISP newcell(long type);
 
 LISP cons(LISP x, LISP y);
 
+LISP external_cons(LISP x, LISP y, LISP line_num);
+
 LISP consp(LISP x);
 
 LISP car(LISP x);
@@ -226,7 +268,11 @@ LISP cdr(LISP x);
 
 LISP setcar(LISP cell, LISP value);
 
+LISP setcar_exteral(LISP cell, LISP value, LISP line_num);
+
 LISP setcdr(LISP cell, LISP value);
+
+LISP setcdr_exteral(LISP cell, LISP value, LISP line_num);
 
 LISP flocons(double x);
 
@@ -281,6 +327,8 @@ void init_subr_1(char *name, LISP (*fcn)(LISP));
 void init_subr_2(char *name, LISP (*fcn)(LISP, LISP));
 
 void init_subr_3(char *name, LISP (*fcn)(LISP, LISP, LISP));
+
+void init_subr_4(char *name, LISP (*fcn)(LISP, LISP, LISP, LISP));
 
 void init_lsubr(char *name, LISP (*fcn)(LISP));
 
@@ -389,6 +437,8 @@ LISP assoc(LISP x, LISP alist);
 
 LISP make_list(LISP x, LISP v);
 
+LISP make_list_external(LISP x, LISP v, LISP custom_tag, LISP line_num);
+
 void set_fatal_exit_hook(void (*fcn)(void));
 
 LISP parse_number(LISP x);
@@ -402,3 +452,31 @@ long repl_c_string(char *, long want_sigint, long want_init, long want_print);
 char *siod_version(void);
 
 LISP nreverse(LISP);
+
+
+/**
+ * macros for gc assertion with new_struct_instance features
+ */
+
+// stages of "assert-dead" assertion
+#define ASSERT_DEAD_STAGE_ROUGH 1
+#define ASSERT_DEAD_STAGE_DETAILED 2
+
+// assert-dead mark
+#define HAS_BEEN_ASSERTED 1
+#define HAD_BEEN_ASSERTED (-1)
+
+#define TYPE_STR_CONS "CONS"
+#define TYPE_STR_FLONUM "FLONUM"
+#define TYPE_STR_SYMBOL "SYMBOL"
+#define TYPE_STR_CLOSURE "CLOSURE"
+#define TYPE_STR_STRING "STRING"
+#define TYPE_STR_FILE "FILE"
+#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
+
+// data structure field type ids
+#define CONS_CAR_TYPE_ID 0
+#define CONS_CDR_TYPE_ID 1
+#define SYMBOL_VCELL_TYPE_ID 0
+#define CLOSURE_CODE_TYPE_ID 0
+#define CLOSURE_ENV_TYPE_ID 1
