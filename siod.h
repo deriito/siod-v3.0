@@ -116,6 +116,7 @@ struct obj {
             struct obj **field_name_strs;
             long length; // assign_sitesとassign_field_indexesの長さ
             long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
+            struct obj *pre;
             struct obj *next; // shadow class def
         } struct_def;
     } storage_as;

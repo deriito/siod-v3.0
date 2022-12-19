@@ -1337,6 +1337,19 @@ char *gen_type_str(ObjLinkElement *obj_link_ele) {
     }
 }
 
+short has_same_elementsp(long *a, long *b, long len) {
+    for (long i = 0; i < len; ++i) {
+        long tmp_a = a[i];
+        for (long j = 0; j < len; ++j) {
+            if (tmp_a != b[i]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+
 void try_update_all_struct_defs() {
     if (NULL == object_links) {
         return;
@@ -1421,19 +1434,53 @@ void try_update_all_struct_defs() {
         // TODO 当前只实现了lisp struct的类型变换
         if (NULL != tmp->struct_def_obj || NNULLP(tmp->struct_def_obj)) {
             LISP struct_def_obj = tmp->struct_def_obj;
-            while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
-                struct_def_obj = struct_def_obj->storage_as.struct_def.next;
+
+            // 检查已有的struct def obj, 并将其移到最末尾
+            LISP selected_one = NIL;
+            for (LISP tmp_selected_one = struct_def_obj; NNULLP(tmp_selected_one->storage_as.struct_def.pre); tmp_selected_one = tmp_selected_one->storage_as.struct_def.pre) {
+                if (tmp->len != tmp_selected_one->storage_as.struct_def.length) {
+                    continue;
+                }
+                if (has_same_elementsp(tmp_selected_one->storage_as.struct_def.assign_field_indexes, tmp->record_slot_idx, tmp->len)) {
+                    selected_one = tmp_selected_one;
+                    break;
+                }
             }
 
-            LISP next_struct_obj = newcell(tc_struct_def);
-            next_struct_obj->storage_as.struct_def.class_name_sym = struct_def_obj->storage_as.struct_def.class_name_sym;
-            next_struct_obj->storage_as.struct_def.dim = struct_def_obj->storage_as.struct_def.dim;
-            next_struct_obj->storage_as.struct_def.field_name_strs = struct_def_obj->storage_as.struct_def.field_name_strs;
-            next_struct_obj->storage_as.struct_def.length = tmp->len;
-            next_struct_obj->storage_as.struct_def.assign_field_indexes = tmp->record_slot_idx;
-            next_struct_obj->storage_as.struct_def.next = NIL;
+            // 将选择的struct def obj移到最后
+            if (NNULLP(selected_one)) {
+                LISP pre_tmp = selected_one->storage_as.struct_def.pre;
+                LISP next_tmp = selected_one->storage_as.struct_def.next;
+                if (NULLP(pre_tmp) && NNULLP(next_tmp)) {
+                    next_tmp->storage_as.struct_def.pre = NIL;
+                } else if (NNULLP(pre_tmp) && NNULLP(next_tmp)) {
+                    pre_tmp->storage_as.struct_def.next = next_tmp;
+                    next_tmp->storage_as.struct_def.pre = pre_tmp;
+                }
 
-            struct_def_obj->storage_as.struct_def.next = next_struct_obj;
+                while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
+                    struct_def_obj = struct_def_obj->storage_as.struct_def.next;
+                }
+
+                selected_one->storage_as.struct_def.pre = struct_def_obj;
+                selected_one->storage_as.struct_def.next = NIL;
+                struct_def_obj->storage_as.struct_def.next = selected_one;
+            } else {
+                LISP new_struct_obj = newcell(tc_struct_def);
+                new_struct_obj->storage_as.struct_def.class_name_sym = struct_def_obj->storage_as.struct_def.class_name_sym;
+                new_struct_obj->storage_as.struct_def.dim = struct_def_obj->storage_as.struct_def.dim;
+                new_struct_obj->storage_as.struct_def.field_name_strs = struct_def_obj->storage_as.struct_def.field_name_strs;
+                new_struct_obj->storage_as.struct_def.length = tmp->len;
+                new_struct_obj->storage_as.struct_def.assign_field_indexes = tmp->record_slot_idx;
+
+                while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
+                    struct_def_obj = struct_def_obj->storage_as.struct_def.next;
+                }
+
+                new_struct_obj->storage_as.struct_def.pre = struct_def_obj;
+                new_struct_obj->storage_as.struct_def.next = NIL;
+                struct_def_obj->storage_as.struct_def.next = new_struct_obj;
+            }
         }
     }
 
@@ -2864,6 +2911,7 @@ LISP define_struct(LISP args, LISP env) {
     }
     class_obj->storage_as.struct_def.length = 0;
     class_obj->storage_as.struct_def.assign_field_indexes = NULL;
+    class_obj->storage_as.struct_def.pre = NIL;
     class_obj->storage_as.struct_def.next = NIL;
 
     // 定义的struct为全局的
