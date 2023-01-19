@@ -268,7 +268,6 @@ long fast_print_table(LISP obj, LISP table);
 
 LISP stack_limit(LISP, LISP);
 
-
 void err0(void);
 
 void pr(LISP);
@@ -284,3 +283,5 @@ LISP lwhile(LISP form, LISP env);
 LISP llength(LISP obj);
 
 void gc_kind_check(void);
+
+long long get_timestamp_us(void);

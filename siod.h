@@ -116,8 +116,9 @@ struct obj {
             struct obj **field_name_strs;
             long length; // assign_sitesとassign_field_indexesの長さ
             long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
-            struct obj *pre;
-            struct obj *next; // shadow class def
+            struct obj *pre; // for hidden class
+            struct obj *next; // for hidden class
+            short active_mark;
         } struct_def;
     } storage_as;
 };
@@ -453,6 +454,15 @@ char *siod_version(void);
 
 LISP nreverse(LISP);
 
+long long get_timestamp_us(void);
+
+LISP print_timestamp_us(void);
+
+LISP mark_timestamp_start(void);
+
+LISP mark_timestamp_end(void);
+
+LISP print_runtime_us(void);
 
 /**
  * macros for gc assertion with new_struct_instance features
