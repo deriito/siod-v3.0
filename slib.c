@@ -150,7 +150,7 @@ long stack_size =
 #endif
 
 // クラスオブジェクトを格納
-LISP *class_objs = NULL;
+LISP *class_objs = NULL; // TODO
 
 // 行号记录功能是否开启的总开关
 short recording_assign_site_on = 1;
@@ -186,9 +186,12 @@ typedef struct {
 // assert-dead的相关信息
 static AssertDeadCallInfo *assert_dead_call_info_table = NULL;
 
-// 用于计算运行时间的全局时间戳
-static long long start_timestamp = -1;
-static long long end_timestamp = -1;
+// 実行のかかるCPU時間の計算のため
+static clock_t clock_start = 0;
+static clock_t clock_end = 0;
+static double gc_clock_time_taken = 0.0;
+static clock_t gc_clock_start = 0;
+static clock_t gc_clock_end = 0;
 
 LISP get_struct_def_obj(LISP ptr) {
     if (tc_struct_instance == ptr->type) {
@@ -1816,14 +1819,13 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
             }
             previous_obj_selected_field = (*ptr).storage_as.struct_instance.struct_def_obj->storage_as.struct_def.dim + 1L;
             ptr = (*ptr).storage_as.struct_instance.struct_def_obj;
-            goto gc_mark_loop;
+            break;
         case tc_struct_instance_with_rec:
             for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
             }
             previous_obj_selected_field = (*ptr).storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.dim + 1L;
-            ptr = (*ptr).storage_as.struct_instance_with_rec.struct_def_obj;
-            goto gc_mark_loop;
+            break;
         case tc_struct_def:
             for (long i = 0; i < (*ptr).storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_def.field_name_strs[i], last_index_of_gc_traced_objs, i);
@@ -3158,10 +3160,9 @@ void init_subrs_1(void) {
     init_subr_1("new-struct-instance", new_struct_instance);
     init_subr_4("set-field", set_field);
     init_subr_2("get-field", get_field);
-    init_subr_0("print-timestamp-us", print_timestamp_us);
-    init_subr_0("mark-timestamp-start", mark_timestamp_start);
-    init_subr_0("mark-timestamp-end", mark_timestamp_end);
-    init_subr_0("print-runtime-us", print_runtime_us);
+    init_subr_0("mark-clock-start", mark_clock_start);
+    init_subr_0("mark-clock-end", mark_clock_end);
+    init_subr_0("print-clock-time-cost", print_clock_time_cost);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */
@@ -3180,28 +3181,33 @@ void prp(LISP *p) {
     pr(*p);
 }
 
-long long get_timestamp_us() {
-    struct timeval t;
-    gettimeofday(&t, 0);
-    return (long long) (t.tv_sec * 1000 * 1000 + t.tv_usec);
-}
-
-LISP print_timestamp_us() {
-    printf("%lld\n", get_timestamp_us());
+LISP mark_clock_start() {
+    clock_start = clock();
     return (NIL);
 }
 
-LISP mark_timestamp_start() {
-    start_timestamp = get_timestamp_us();
+LISP mark_clock_end() {
+    clock_end = clock();
     return (NIL);
 }
 
-LISP mark_timestamp_end() {
-    end_timestamp = get_timestamp_us();
+LISP print_clock_time_cost() {
+    double duration = (double) (clock_end - clock_start) / CLOCKS_PER_SEC;
+    printf("%f sec(s) cpu time cost.\n", duration - gc_clock_time_taken);
+    clock_start = 0;
+    clock_end = 0;
+    gc_clock_time_taken = 0.0;
     return (NIL);
 }
 
-LISP print_runtime_us() {
-    printf("cost time: %lld us\n", end_timestamp - start_timestamp);
-    return (NIL);
+void mark_gc_clock_start() {
+    gc_clock_start = clock();
+}
+
+void mark_gc_clock_end() {
+    gc_clock_end = clock();
+    double duration = (double) (gc_clock_end - gc_clock_start) / CLOCKS_PER_SEC;
+    gc_clock_time_taken = gc_clock_time_taken + duration;
+    gc_clock_start = 0;
+    gc_clock_end = 0;
 }

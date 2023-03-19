@@ -284,4 +284,39 @@ LISP llength(LISP obj);
 
 void gc_kind_check(void);
 
-long long get_timestamp_us(void);
+LISP mark_clock_start(void);
+
+LISP mark_clock_end(void);
+
+LISP print_clock_time_cost(void);
+
+void mark_gc_clock_start(void);
+
+void mark_gc_clock_end(void);
+
+/**
+ * macros for gc assertion with new_struct_instance features
+ */
+
+// stages of "assert-dead" assertion
+#define ASSERT_DEAD_STAGE_ROUGH 1
+#define ASSERT_DEAD_STAGE_DETAILED 2
+
+// assert-dead mark
+#define HAS_BEEN_ASSERTED 1
+#define HAD_BEEN_ASSERTED (-1)
+
+#define TYPE_STR_CONS "CONS"
+#define TYPE_STR_FLONUM "FLONUM"
+#define TYPE_STR_SYMBOL "SYMBOL"
+#define TYPE_STR_CLOSURE "CLOSURE"
+#define TYPE_STR_STRING "STRING"
+#define TYPE_STR_FILE "FILE"
+#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
+
+// data structure field type ids
+#define CONS_CAR_TYPE_ID 0
+#define CONS_CDR_TYPE_ID 1
+#define SYMBOL_VCELL_TYPE_ID 0
+#define CLOSURE_CODE_TYPE_ID 0
+#define CLOSURE_ENV_TYPE_ID 1

@@ -13,7 +13,7 @@
 
 (define o1 '() 14)
 
-(mark-timestamp-start)
+(mark-clock-start)
 
 (loop 10000
     (lambda ()
@@ -42,5 +42,5 @@
           ))
         (gc)) 19))
 
-(mark-timestamp-end)
-(print-runtime-us)
+(mark-clock-end)
+(print-clock-time-cost)
