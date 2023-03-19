@@ -116,8 +116,9 @@ struct obj {
             struct obj **field_name_strs;
             long length; // assign_sitesとassign_field_indexesの長さ
             long *assign_field_indexes; // data配列の何番目のfieldには，行番号情報が記録している
-            struct obj *pre;
-            struct obj *next; // shadow class def
+            struct obj *pre; // for hidden class
+            struct obj *next; // for hidden class
+            short active_mark;
         } struct_def;
     } storage_as;
 };
@@ -452,31 +453,3 @@ long repl_c_string(char *, long want_sigint, long want_init, long want_print);
 char *siod_version(void);
 
 LISP nreverse(LISP);
-
-
-/**
- * macros for gc assertion with new_struct_instance features
- */
-
-// stages of "assert-dead" assertion
-#define ASSERT_DEAD_STAGE_ROUGH 1
-#define ASSERT_DEAD_STAGE_DETAILED 2
-
-// assert-dead mark
-#define HAS_BEEN_ASSERTED 1
-#define HAD_BEEN_ASSERTED (-1)
-
-#define TYPE_STR_CONS "CONS"
-#define TYPE_STR_FLONUM "FLONUM"
-#define TYPE_STR_SYMBOL "SYMBOL"
-#define TYPE_STR_CLOSURE "CLOSURE"
-#define TYPE_STR_STRING "STRING"
-#define TYPE_STR_FILE "FILE"
-#define TYPE_STR_NO_SUCH_TYPE "NO SUCH TYPE: "
-
-// data structure field type ids
-#define CONS_CAR_TYPE_ID 0
-#define CONS_CDR_TYPE_ID 1
-#define SYMBOL_VCELL_TYPE_ID 0
-#define CLOSURE_CODE_TYPE_ID 0
-#define CLOSURE_ENV_TYPE_ID 1

@@ -1,19 +1,30 @@
-(define global-val-a 1 1)
-(define global-val-b 2 2)
+;; 構造体の定義
+(define-struct A ("field1" "field2"))
+(define-struct B ("field1" "field2"))
+(define-struct C ("field1" "field2"))
 
-(define func
-  (lambda (x)
-    (let ((my-cons (cons x x 6)))
+(define loop
+  (lambda (n func)
+  (if (> n 0)
+    (begin
+      (print n)
+      (func)
+      (loop (- n 1) func))
+    99) 7) 6)
+
+(define a '() 15)
+
+(print
+  (loop 4
+    (lambda ()
       (begin
-        (assert-dead my-cons 8)
-        (if (eqv? x 1)
-          (set! global-val-a my-cons 10)
-          (set! global-val-b my-cons 11)))) 5) 4)
+      (set! a (new-struct-instance A) 21)
+      (let ((b (new-struct-instance B))
+            (c (new-struct-instance C)))
+        (begin
+          (set-field a "field1" b 25)
+          (set-field b "field2" c 26)
+          (assert-dead c 27)
+          ))
+       (gc)) 19)))
 
-
-(func 1)
-(gc)
-
-(func 1)
-(func 2)
-(gc)

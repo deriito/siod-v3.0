@@ -72,6 +72,7 @@ Cambridge, MA 02138
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "siod.h"
 #include "siodp.h"
@@ -149,7 +150,7 @@ long stack_size =
 #endif
 
 // クラスオブジェクトを格納
-LISP *class_objs = NULL;
+LISP *class_objs = NULL; // TODO
 
 // 行号记录功能是否开启的总开关
 short recording_assign_site_on = 1;
@@ -184,6 +185,13 @@ typedef struct {
 
 // assert-dead的相关信息
 static AssertDeadCallInfo *assert_dead_call_info_table = NULL;
+
+// 実行のかかるCPU時間の計算のため
+static clock_t clock_start = 0;
+static clock_t clock_end = 0;
+static double gc_clock_time_taken = 0.0;
+static clock_t gc_clock_start = 0;
+static clock_t gc_clock_end = 0;
 
 LISP get_struct_def_obj(LISP ptr) {
     if (tc_struct_instance == ptr->type) {
@@ -1349,6 +1357,62 @@ short has_same_elementsp(long *a, long *b, long len) {
     return 1;
 }
 
+LISP get_first_struct_def_obj(LISP struct_def) {
+    if (NTYPEP(struct_def, tc_struct_def)) {
+        err("Wrong type! (see get_first_struct_def_obj)", NIL);
+    }
+
+    if (NULLP(struct_def->storage_as.struct_def.pre)) {
+        return struct_def;
+    }
+
+    while (NNULLP(struct_def->storage_as.struct_def.pre)) {
+        struct_def = struct_def->storage_as.struct_def.pre;
+    }
+
+    return struct_def;
+}
+
+LISP get_last_struct_def_obj(LISP struct_def) {
+    if (NTYPEP(struct_def, tc_struct_def)) {
+        err("Wrong type! (see get_last_struct_def_obj)", NIL);
+    }
+
+    if (NULLP(struct_def->storage_as.struct_def.next)) {
+        return struct_def;
+    }
+
+    while (NNULLP(struct_def->storage_as.struct_def.next)) {
+        struct_def = struct_def->storage_as.struct_def.next;
+    }
+
+    return struct_def;
+}
+
+LISP get_active_struct_def_obj(LISP struct_def) {
+    if (NTYPEP(struct_def, tc_struct_def)) {
+        err("wrong struct_def obj!(see get_active_struct_def_obj)", struct_def);
+    }
+
+    if (struct_def->storage_as.struct_def.active_mark) {
+        return struct_def;
+    }
+
+    struct_def = get_first_struct_def_obj(struct_def);
+
+    if (struct_def->storage_as.struct_def.active_mark) {
+        return struct_def;
+    }
+
+    while (NNULLP(struct_def->storage_as.struct_def.next)) {
+        struct_def = struct_def->storage_as.struct_def.next;
+        if (struct_def->storage_as.struct_def.active_mark) {
+            return struct_def;
+        }
+    }
+
+    err("Why? (see get_active_struct_def_obj)", NIL);
+}
 
 void try_update_all_struct_defs() {
     if (NULL == object_links) {
@@ -1435,9 +1499,9 @@ void try_update_all_struct_defs() {
         if (NULL != tmp->struct_def_obj || NNULLP(tmp->struct_def_obj)) {
             LISP struct_def_obj = tmp->struct_def_obj;
 
-            // 检查已有的struct def obj, 并将其移到最末尾
+            // 检查是否已经有完全一样的了
             LISP selected_one = NIL;
-            for (LISP tmp_selected_one = struct_def_obj; NNULLP(tmp_selected_one->storage_as.struct_def.pre); tmp_selected_one = tmp_selected_one->storage_as.struct_def.pre) {
+            for (LISP tmp_selected_one = get_first_struct_def_obj(struct_def_obj); NNULLP(tmp_selected_one->storage_as.struct_def.next); tmp_selected_one = tmp_selected_one->storage_as.struct_def.next) {
                 if (tmp->len != tmp_selected_one->storage_as.struct_def.length) {
                     continue;
                 }
@@ -1447,24 +1511,11 @@ void try_update_all_struct_defs() {
                 }
             }
 
-            // 将选择的struct def obj移到最后
+            LISP cur_active_obj = get_active_struct_def_obj(struct_def_obj);
+            cur_active_obj->storage_as.struct_def.active_mark = 0;
+
             if (NNULLP(selected_one)) {
-                LISP pre_tmp = selected_one->storage_as.struct_def.pre;
-                LISP next_tmp = selected_one->storage_as.struct_def.next;
-                if (NULLP(pre_tmp) && NNULLP(next_tmp)) {
-                    next_tmp->storage_as.struct_def.pre = NIL;
-                } else if (NNULLP(pre_tmp) && NNULLP(next_tmp)) {
-                    pre_tmp->storage_as.struct_def.next = next_tmp;
-                    next_tmp->storage_as.struct_def.pre = pre_tmp;
-                }
-
-                while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
-                    struct_def_obj = struct_def_obj->storage_as.struct_def.next;
-                }
-
-                selected_one->storage_as.struct_def.pre = struct_def_obj;
-                selected_one->storage_as.struct_def.next = NIL;
-                struct_def_obj->storage_as.struct_def.next = selected_one;
+                selected_one->storage_as.struct_def.active_mark = 1;
             } else {
                 LISP new_struct_obj = newcell(tc_struct_def);
                 new_struct_obj->storage_as.struct_def.class_name_sym = struct_def_obj->storage_as.struct_def.class_name_sym;
@@ -1472,10 +1523,10 @@ void try_update_all_struct_defs() {
                 new_struct_obj->storage_as.struct_def.field_name_strs = struct_def_obj->storage_as.struct_def.field_name_strs;
                 new_struct_obj->storage_as.struct_def.length = tmp->len;
                 new_struct_obj->storage_as.struct_def.assign_field_indexes = tmp->record_slot_idx;
+                new_struct_obj->storage_as.struct_def.active_mark = 1;
+                new_struct_obj->gc_mark = 1;
 
-                while (NNULLP(struct_def_obj->storage_as.struct_def.next)) {
-                    struct_def_obj = struct_def_obj->storage_as.struct_def.next;
-                }
+                struct_def_obj = get_last_struct_def_obj(struct_def_obj);
 
                 new_struct_obj->storage_as.struct_def.pre = struct_def_obj;
                 new_struct_obj->storage_as.struct_def.next = NIL;
@@ -1766,11 +1817,14 @@ void gc_mark(LISP ptr, long last_index_of_gc_traced_objs, long previous_obj_sele
             for (long i = 0; i < (*ptr).storage_as.struct_instance.struct_def_obj->storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance.data[i], last_index_of_gc_traced_objs, i);
             }
+            previous_obj_selected_field = (*ptr).storage_as.struct_instance.struct_def_obj->storage_as.struct_def.dim + 1L;
+            ptr = (*ptr).storage_as.struct_instance.struct_def_obj;
             break;
         case tc_struct_instance_with_rec:
             for (long i = 0; i < (*ptr).storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.dim; ++i) {
                 gc_mark((*ptr).storage_as.struct_instance_with_rec.data[i], last_index_of_gc_traced_objs, i);
             }
+            previous_obj_selected_field = (*ptr).storage_as.struct_instance_with_rec.struct_def_obj->storage_as.struct_def.dim + 1L;
             break;
         case tc_struct_def:
             for (long i = 0; i < (*ptr).storage_as.struct_def.dim; ++i) {
@@ -2134,7 +2188,7 @@ LISP leval_setq(LISP args, LISP env) {
     if (recording_assign_site_on) {
         // for recording assign site
         long assign_site = (long) car(cdr(cdr(args)))->storage_as.flonum.data;
-        try_record_assign_site(var, val, assign_site, 1);
+        try_record_assign_site(var, val, assign_site, 0);
     }
     return (setvar(var, val, env));
 }
@@ -2880,7 +2934,7 @@ LISP nreverse(LISP x) {
 }
 
 /**
- * (define class_name_sym_str (field1 field2 field3 ...))
+ * (define-struct class_name ("field1" "field2" "field3" ...))
  */
 LISP define_struct(LISP args, LISP env) {
     LISP class_name = car(args);
@@ -2913,6 +2967,10 @@ LISP define_struct(LISP args, LISP env) {
     class_obj->storage_as.struct_def.assign_field_indexes = NULL;
     class_obj->storage_as.struct_def.pre = NIL;
     class_obj->storage_as.struct_def.next = NIL;
+    class_obj->storage_as.struct_def.active_mark = 1;
+
+    // automatically create constructor, accessor and mutator procedures for the new struct
+    // LISP tmp_exp;
 
     // 定义的struct为全局的
     return (VCELL(class_name) = class_obj);
@@ -2924,9 +2982,7 @@ LISP new_struct_instance(LISP struct_def) {
         err("wrong struct_def obj!(see new_struct_instance)", struct_def);
     }
 
-    while (NNULLP(struct_def->storage_as.struct_def.next)) {
-        struct_def = struct_def->storage_as.struct_def.next;
-    }
+    struct_def = get_active_struct_def_obj(struct_def);
 
     long length = struct_def->storage_as.struct_def.length;
     long type = length <= 0 ? tc_struct_instance : tc_struct_instance_with_rec;
@@ -3104,6 +3160,9 @@ void init_subrs_1(void) {
     init_subr_1("new-struct-instance", new_struct_instance);
     init_subr_4("set-field", set_field);
     init_subr_2("get-field", get_field);
+    init_subr_0("mark-clock-start", mark_clock_start);
+    init_subr_0("mark-clock-end", mark_clock_end);
+    init_subr_0("print-clock-time-cost", print_clock_time_cost);
 }
 
 /* err0,pr,prp are convenient to call from the C-language debugger */
@@ -3120,4 +3179,35 @@ void pr(LISP p) {
 void prp(LISP *p) {
     if (!p) return;
     pr(*p);
+}
+
+LISP mark_clock_start() {
+    clock_start = clock();
+    return (NIL);
+}
+
+LISP mark_clock_end() {
+    clock_end = clock();
+    return (NIL);
+}
+
+LISP print_clock_time_cost() {
+    double duration = (double) (clock_end - clock_start) / CLOCKS_PER_SEC;
+    printf("%f sec(s) cpu time cost.\n", duration - gc_clock_time_taken);
+    clock_start = 0;
+    clock_end = 0;
+    gc_clock_time_taken = 0.0;
+    return (NIL);
+}
+
+void mark_gc_clock_start() {
+    gc_clock_start = clock();
+}
+
+void mark_gc_clock_end() {
+    gc_clock_end = clock();
+    double duration = (double) (gc_clock_end - gc_clock_start) / CLOCKS_PER_SEC;
+    gc_clock_time_taken = gc_clock_time_taken + duration;
+    gc_clock_start = 0;
+    gc_clock_end = 0;
 }
